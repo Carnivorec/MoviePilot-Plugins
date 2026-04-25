@@ -1,3 +1,5 @@
+自用fork，修复遇到的部分bug
+
 # MoviePilot-Plugins
 
 > [!NOTE]

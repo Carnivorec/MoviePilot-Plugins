@@ -8,7 +8,7 @@ CONFIG_FILE_LOADED=""
 load_local_config() {
   local config_file="${INSTALL_CONFIG_FILE:-}"
   local candidate key current value
-  local keys=(CONTAINER_NAME MP_BASE_URL MP_USERNAME MP_PASSWORD MP_TOKEN CONTAINER_REPO_PATH PACKAGE_VERSION)
+  local keys=(CONTAINER_NAME MP_BASE_URL MP_USERNAME MP_PASSWORD MP_TOKEN CONTAINER_REPO_PATH PACKAGE_VERSION UPSTREAM_REMOTE_URL UPSTREAM_BRANCH)
 
   if [[ -z "$config_file" ]]; then
     for candidate in "$REPO_DIR/install_config.env" "$REPO_DIR/.env"; do
@@ -49,10 +49,13 @@ MP_PASSWORD="${MP_PASSWORD:-}"
 MP_TOKEN="${MP_TOKEN:-}"
 CONTAINER_REPO_PATH="${CONTAINER_REPO_PATH:-/config/plugin_forks/MoviePilot-Plugins}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-v2}"
+UPSTREAM_REMOTE_URL="${UPSTREAM_REMOTE_URL:-https://github.com/DDSRem-Dev/MoviePilot-Plugins.git}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 
 TARGET=""
 DRY_RUN=0
 VERIFY_ONLY=0
+CHECK_UPSTREAM=0
 ROLLBACK_MODE=""
 COPY_ONLY=0
 ALLOW_DIRTY=0
@@ -72,39 +75,50 @@ fail() {
 usage() {
   if command -v base64 >/dev/null 2>&1; then
     base64 -d <<'USAGE_B64'
-TW92aWVQaWxvdCDmnKzlnLAgZm9yayDmj5Lku7blronoo4XohJrmnKwKCueUqOazle+8mgogIC4v
-aW5zdGFsbC5zaCA855uu5qCHPiBb6YCJ6aG5XQogIC4vaW5zdGFsbC5zaCAtaAogIC4vaW5zdGFs
-bC5zaCAtLWhlbHAKCuebruagh++8mgogIGFsbCAgICAgICAgICAgICAgIOWuieijhS/mm7TmlrAg
-cDExNWRpc2sg5ZKMIHAxMTVzdHJtaGVscGVyCiAgcDExNXN0cm1oZWxwZXIgICAg5a6J6KOFL+ab
-tOaWsCAxMTUgU1RSTSDliqnmiYsKICBwMTE1ZGlzayAgICAgICAgICDlronoo4Uv5pu05pawIDEx
-NSDnvZHnm5jlgqjlrZjmqKHlnZcKCumFjee9ruaWueW8j+S4gO+8muacrOWcsOmFjee9ruaWh+S7
-tu+8iOaOqOiNkO+8iQogIGNhdCA+IGluc3RhbGxfY29uZmlnLmVudiA8PCdFT0YnCiAgTVBfVVNF
-Uk5BTUU9J+S9oOeahE1vdmllUGlsb3TnlKjmiLflkI0nCiAgTVBfUEFTU1dPUkQ9J+S9oOeahE1v
-dmllUGlsb3Tlr4bnoIEnCiAgRU9GCgogIC4vaW5zdGFsbC5zaCBhbGwKCumFjee9ruaWueW8j+S6
-jO+8muS4tOaXtueOr+Wig+WPmOmHjwogIE1QX1VTRVJOQU1FPSfkvaDnmoRNb3ZpZVBpbG9055So
-5oi35ZCNJyBNUF9QQVNTV09SRD0n5L2g55qETW92aWVQaWxvdOWvhueggScgLi9pbnN0YWxsLnNo
-IGFsbAoK5bi455So5ZG95Luk77yaCiAg6aKE6KeI77yM5LiN5L+u5pS55a655Zmo77yaCiAgICAu
-L2luc3RhbGwuc2ggYWxsIC0tZHJ5LXJ1bgoKICDlronoo4Uv5pu05paw5YWo6YOo77yaCiAgICAu
-L2luc3RhbGwuc2ggYWxsCgogIOWPquWuieijhS/mm7TmlrAgU1RSTSDliqnmiYvvvJoKICAgIC4v
-aW5zdGFsbC5zaCBwMTE1c3RybWhlbHBlcgoKICDlj6rlronoo4Uv5pu05pawIFAxMTVEaXNr77ya
-CiAgICAuL2luc3RhbGwuc2ggcDExNWRpc2sKCiAg6aqM6K+B5b2T5YmN5a655Zmo5YaF54mI5pys
-77yaCiAgICAuL2luc3RhbGwuc2ggYWxsIC0tdmVyaWZ5CgogIOWbnua7muafkOS4quaPkuS7tuWI
-sOacgOi/keS4gOasoeWkh+S7ve+8mgogICAgLi9pbnN0YWxsLnNoIHAxMTVzdHJtaGVscGVyIC0t
-cm9sbGJhY2sgbGF0ZXN0CgrpgInpobnvvJoKICAtLWRyeS1ydW4gICAgICAgICAgICAgICAgIOWP
-qumihOiniO+8jOS4jeS/ruaUueWuueWZqAogIC0tdmVyaWZ5ICAgICAgICAgICAgICAgICAg5Y+q
-6aqM6K+B77yM5LiN5a6J6KOFCiAgLS1yb2xsYmFjayBsYXRlc3QgICAgICAgICDlm57mu5rliLDm
-nIDov5HkuIDmrKHlpIfku70KICAtLWNvcHktb25seSAgICAgICAgICAgICAgIOW6lOaApeebtOaL
-t+WuieijhQogIC0tZm9yY2UgICAgICAgICAgICAgICAgICAg5b+955Wl5Lu75Yqh6L+Q6KGM54q2
-5oCB5qOA5p+lCiAgLS1hbGxvdy1kaXJ0eSAgICAgICAgICAgICDlhYHorrggZ2l0IOW3peS9nOWM
-uuS4jeW5suWHgAogIC0tYWxsb3ctbm9uZm9yay12ZXJzaW9uICAg5YWB6K646Z2eIDk5LiDlvIDl
-pLTniYjmnKwKICAtaCwgLS1oZWxwICAgICAgICAgICAgICAgIOaYvuekuuW4ruWKqQoK546v5aKD
-5Y+Y6YeP77yaCiAgSU5TVEFMTF9DT05GSUdfRklMRSAgICAgICDmjIflrprphY3nva7mlofku7bo
-t6/lvoQKICBNUF9VU0VSTkFNRSAgICAgICAgICAgICAgIE1vdmllUGlsb3Qg55So5oi35ZCNCiAg
-TVBfUEFTU1dPUkQgICAgICAgICAgICAgICBNb3ZpZVBpbG90IOWvhueggQogIE1QX1RPS0VOICAg
-ICAgICAgICAgICAgICAgTW92aWVQaWxvdCBUb2tlbu+8jOacieWug+WwseS4jeeUqOeUqOaIt+WQ
-jeWvhueggQogIE1QX0JBU0VfVVJMICAgICAgICAgICAgICAgTW92aWVQaWxvdCDlnLDlnYDvvIzp
-u5jorqQgaHR0cDovLzEyNy4wLjAuMTozMDAxCiAgQ09OVEFJTkVSX05BTUUgICAgICAgICAgICDl
-rrnlmajlkI3vvIzpu5jorqQgbW92aWVwaWxvdC12Mgo=
+TW92aWVQaWxvdCDmnKzlnLAgZm9yayDmj5Lku7blronoo4XohJrmnKwKCueUqOazlToKICAuL2lu
+c3RhbGwuc2ggPOebruaghz4gW+mAiemhuV0KICAuL2luc3RhbGwuc2ggLWgKICAuL2luc3RhbGwu
+c2ggLS1oZWxwCgrnm67moIc6CiAgYWxsICAgICAgICAgICAgIOWuieijhS/mm7TmlrAgcDExNWRp
+c2sg5ZKMIHAxMTVzdHJtaGVscGVyCiAgcDExNXN0cm1oZWxwZXIg5a6J6KOFL+abtOaWsCAxMTUg
+U1RSTSDliqnmiYsKICBwMTE1ZGlzayAgICAgICDlronoo4Uv5pu05pawIDExNSDnvZHnm5jlrZjl
+gqjmqKHlnZcKCumFjee9ruaWueW8j+S4gO+8muacrOWcsOmFjee9ruaWh+S7tu+8iOaOqOiNkO+8
+iQogIGNhdCA+IGluc3RhbGxfY29uZmlnLmVudiA8PCdFT0YnCiAgTVBfVVNFUk5BTUU9J+S9oOea
+hCBNb3ZpZVBpbG90IOeUqOaIt+WQjScKICBNUF9QQVNTV09SRD0n5L2g55qEIE1vdmllUGlsb3Qg
+5a+G56CBJwogIEVPRgoKICAuL2luc3RhbGwuc2ggYWxsCgrphY3nva7mlrnlvI/kuozvvJrkuLTm
+l7bnjq/looPlj5jph48KICBNUF9VU0VSTkFNRT0n5L2g55qEIE1vdmllUGlsb3Qg55So5oi35ZCN
+JyBNUF9QQVNTV09SRD0n5L2g55qEIE1vdmllUGlsb3Qg5a+G56CBJyAuL2luc3RhbGwuc2ggYWxs
+CgrluLjnlKjlkb3ku6Q6CiAg6aKE6KeI77yM5LiN5L+u5pS55a655ZmoOgogICAgLi9pbnN0YWxs
+LnNoIGFsbCAtLWRyeS1ydW4KCiAg5a6J6KOFL+abtOaWsOWFqOmDqDoKICAgIC4vaW5zdGFsbC5z
+aCBhbGwKCiAg5Y+q5a6J6KOFL+abtOaWsCBTVFJNIOWKqeaJizoKICAgIC4vaW5zdGFsbC5zaCBw
+MTE1c3RybWhlbHBlcgoKICDlj6rlronoo4Uv5pu05pawIFAxMTVEaXNrOgogICAgLi9pbnN0YWxs
+LnNoIHAxMTVkaXNrCgogIOmqjOivgeW9k+WJjeWuueWZqOWGheeJiOacrDoKICAgIC4vaW5zdGFs
+bC5zaCBhbGwgLS12ZXJpZnkKCiAg5qOA5p+l5Li75LuT5bqT5piv5ZCm5pu05pawOgogICAgLi9p
+bnN0YWxsLnNoIGFsbCAtLWNoZWNrLXVwc3RyZWFtCgogIOajgOafpeaMh+WumuaPkuS7tuaYr+WQ
+puWPl+S4u+S7k+W6k+abtOaWsOW9seWTjToKICAgIC4vaW5zdGFsbC5zaCBwMTE1c3RybWhlbHBl
+ciAtLWNoZWNrLXVwc3RyZWFtCgogIOaMh+WumuS4u+S7k+W6k+WcsOWdgOWSjOWIhuaUrzoKICAg
+IC4vaW5zdGFsbC5zaCBhbGwgLS1jaGVjay11cHN0cmVhbSAtLXVwc3RyZWFtLXVybCBodHRwczov
+L2dpdGh1Yi5jb20vRERTUmVtLURldi9Nb3ZpZVBpbG90LVBsdWdpbnMuZ2l0IC0tdXBzdHJlYW0t
+YnJhbmNoIG1haW4KCiAg5Zue5rua5p+Q5Liq5o+S5Lu25Yiw5pyA6L+R5LiA5qyh5aSH5Lu9Ogog
+ICAgLi9pbnN0YWxsLnNoIHAxMTVzdHJtaGVscGVyIC0tcm9sbGJhY2sgbGF0ZXN0CgrpgInpobk6
+CiAgLS1kcnktcnVuICAgICAgICAgICAgICAgICDlj6rpooTop4jvvIzkuI3kv67mlLnlrrnlmagK
+ICAtLXZlcmlmeSAgICAgICAgICAgICAgICAgIOWPqumqjOivge+8jOS4jeWuieijhQogIC0tY2hl
+Y2stdXBzdHJlYW0gICAgICAgICAg5qOA5p+l5Li75LuT5bqT5pu05paw77yM5LiN5a6J6KOF44CB
+5LiN5L+u5pS55a655ZmoCiAgLS11cHN0cmVhbS11cmwgVVJMICAgICAgICDmjIflrprkuLvku5Pl
+upPlnLDlnYDvvIzpu5jorqTlrpjmlrnku5PlupMKICAtLXVwc3RyZWFtLWJyYW5jaCBCUkFOQ0gg
+IOaMh+WumuS4u+S7k+W6k+WIhuaUr++8jOm7mOiupCBtYWluCiAgLS1yb2xsYmFjayBsYXRlc3Qg
+ICAgICAgICDlm57mu5rliLDmnIDov5HkuIDmrKHlpIfku70KICAtLWNvcHktb25seSAgICAgICAg
+ICAgICAgIOW6lOaApeebtOaOpeWkjeWItuWuieijhQogIC0tZm9yY2UgICAgICAgICAgICAgICAg
+ICAg5b+955Wl5Lu75Yqh6L+Q6KGM54q25oCB5qOA5p+lCiAgLS1hbGxvdy1kaXJ0eSAgICAgICAg
+ICAgICDlhYHorrggZ2l0IOW3peS9nOWMuuS4jeW5suWHgAogIC0tYWxsb3ctbm9uZm9yay12ZXJz
+aW9uICAg5YWB6K646Z2eIDk5LiDlvIDlpLTniYjmnKwKICAtaCwgLS1oZWxwICAgICAgICAgICAg
+ICAgIOaYvuekuuW4ruWKqQoK546v5aKD5Y+Y6YePOgogIElOU1RBTExfQ09ORklHX0ZJTEUgICAg
+ICAg5oyH5a6a6YWN572u5paH5Lu26Lev5b6ECiAgTVBfVVNFUk5BTUUgICAgICAgICAgICAgICBN
+b3ZpZVBpbG90IOeUqOaIt+WQjQogIE1QX1BBU1NXT1JEICAgICAgICAgICAgICAgTW92aWVQaWxv
+dCDlr4bnoIEKICBNUF9UT0tFTiAgICAgICAgICAgICAgICAgIE1vdmllUGlsb3QgVG9rZW7vvIzm
+nInlroPlsLHkuI3nlKjnlKjmiLflkI3lr4bnoIEKICBNUF9CQVNFX1VSTCAgICAgICAgICAgICAg
+IE1vdmllUGlsb3Qg5Zyw5Z2A77yM6buY6K6kIGh0dHA6Ly8xMjcuMC4wLjE6MzAwMQogIENPTlRB
+SU5FUl9OQU1FICAgICAgICAgICAg5a655Zmo5ZCN77yM6buY6K6kIG1vdmllcGlsb3QtdjIKICBV
+UFNUUkVBTV9SRU1PVEVfVVJMICAgICAgIOS4u+S7k+W6k+WcsOWdgAogIFVQU1RSRUFNX0JSQU5D
+SCAgICAgICAgICAg5Li75LuT5bqT5YiG5pSvCg==
 USAGE_B64
   else
     printf '%s\n' "Usage: ./install.sh TARGET [options]"
@@ -127,6 +141,28 @@ parse_args() {
         ;;
       --verify)
         VERIFY_ONLY=1
+        shift
+        ;;
+      --check-upstream)
+        CHECK_UPSTREAM=1
+        shift
+        ;;
+      --upstream-url)
+        [[ $# -ge 2 ]] || fail "--upstream-url requires a value"
+        UPSTREAM_REMOTE_URL="$2"
+        shift 2
+        ;;
+      --upstream-url=*)
+        UPSTREAM_REMOTE_URL="${1#*=}"
+        shift
+        ;;
+      --upstream-branch)
+        [[ $# -ge 2 ]] || fail "--upstream-branch requires a value"
+        UPSTREAM_BRANCH="$2"
+        shift 2
+        ;;
+      --upstream-branch=*)
+        UPSTREAM_BRANCH="${1#*=}"
         shift
         ;;
       --rollback)
@@ -173,6 +209,15 @@ parse_args() {
   fi
   if [[ "$VERIFY_ONLY" -eq 1 && -n "$ROLLBACK_MODE" ]]; then
     fail "--verify and --rollback cannot be used together"
+  fi
+  if [[ "$CHECK_UPSTREAM" -eq 1 && -n "$ROLLBACK_MODE" ]]; then
+    fail "--check-upstream and --rollback cannot be used together"
+  fi
+  if [[ "$CHECK_UPSTREAM" -eq 1 && "$VERIFY_ONLY" -eq 1 ]]; then
+    fail "--check-upstream and --verify cannot be used together"
+  fi
+  if [[ "$CHECK_UPSTREAM" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+    fail "--check-upstream and --dry-run cannot be used together"
   fi
   if [[ "$DRY_RUN" -eq 1 && -n "$ROLLBACK_MODE" ]]; then
     fail "--dry-run and --rollback cannot be used together"
@@ -225,6 +270,87 @@ expand_targets() {
   esac
 }
 
+target_paths_for() {
+  case "$1" in
+    P115StrmHelper)
+      printf '%s\n' \
+        "plugins.v2/p115strmhelper" \
+        "frontend/p115strmhelper" \
+        "package.v2.json"
+      ;;
+    P115Disk)
+      printf '%s\n' \
+        "plugins.v2/p115disk" \
+        "package.v2.json"
+      ;;
+    *)
+      fail "No upstream path mapping for $1"
+      ;;
+  esac
+}
+
+check_upstream_updates() {
+  local pids=("$@")
+  local upstream_ref upstream_head ahead behind paths_text changed_paths commits
+  local -a path_args=()
+
+  cd "$REPO_DIR"
+  [[ -n "$UPSTREAM_REMOTE_URL" ]] || fail "UPSTREAM_REMOTE_URL is empty"
+  [[ -n "$UPSTREAM_BRANCH" ]] || fail "UPSTREAM_BRANCH is empty"
+
+  log "Checking upstream updates"
+  printf 'upstream remote: %s\n' "$UPSTREAM_REMOTE_URL"
+  printf 'upstream branch: %s\n' "$UPSTREAM_BRANCH"
+
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags "$UPSTREAM_REMOTE_URL" "$UPSTREAM_BRANCH" || \
+    fail "Failed to fetch upstream branch: $UPSTREAM_REMOTE_URL $UPSTREAM_BRANCH"
+
+  upstream_ref="FETCH_HEAD"
+  upstream_head="$(git log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%h %ad %s' "$upstream_ref")"
+  printf 'upstream HEAD: %s\n' "$upstream_head"
+
+  read -r ahead behind < <(git rev-list --left-right --count "HEAD...$upstream_ref")
+  printf 'local ahead: %s\n' "$ahead"
+  printf 'local behind: %s\n' "$behind"
+
+  if [[ "$behind" == "0" ]]; then
+    log "No newer upstream commits found"
+    return 0
+  fi
+
+  printf '\nupstream commits not in local HEAD:\n'
+  git log --date=format:'%Y-%m-%d %H:%M:%S %z' --format='  %h %ad %s' "HEAD..$upstream_ref" | sed -n '1,30p'
+
+  paths_text="$(
+    for pid in "${pids[@]}"; do
+      target_paths_for "$pid"
+    done | awk '!seen[$0]++'
+  )"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && path_args+=("$path")
+  done <<< "$paths_text"
+
+  printf '\nwatched paths:\n'
+  printf '  %s\n' "${path_args[@]}"
+
+  changed_paths="$(git diff --name-only "HEAD..$upstream_ref" -- "${path_args[@]}" || true)"
+  if [[ -z "$changed_paths" ]]; then
+    printf '\nresult: upstream has new commits, but none touched watched paths for this target.\n'
+    return 0
+  fi
+
+  printf '\nchanged watched paths:\n'
+  printf '%s\n' "$changed_paths" | sed 's/^/  /'
+
+  commits="$(git log --date=format:'%Y-%m-%d %H:%M:%S %z' --format='  %h %ad %s' "HEAD..$upstream_ref" -- "${path_args[@]}" || true)"
+  if [[ -n "$commits" ]]; then
+    printf '\ncommits touching watched paths:\n'
+    printf '%s\n' "$commits" | sed -n '1,30p'
+  fi
+
+  printf '\nresult: upstream has updates that may affect the selected plugin target. Review before merging or installing.\n'
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
 }
@@ -235,7 +361,7 @@ check_repo() {
   [[ -f package.v2.json ]] || fail "package.v2.json not found"
   [[ -d plugins.v2 ]] || fail "plugins.v2 not found"
 
-  if [[ "$ALLOW_DIRTY" -ne 1 ]]; then
+  if [[ "$ALLOW_DIRTY" -ne 1 && "$CHECK_UPSTREAM" -ne 1 ]]; then
     if [[ -n "$(git status --porcelain)" ]]; then
       fail "Git working tree is dirty. Commit changes or pass --allow-dirty."
     fi
@@ -730,20 +856,27 @@ process_plugin() {
 }
 
 main() {
-  CURL_BIN="$(command -v curl || true)"
-  [[ -n "$CURL_BIN" ]] || fail "Required command not found: curl"
-  require_cmd docker
   require_cmd git
-  require_cmd jq
-  require_cmd tar
 
   parse_args "$@"
   check_repo
-  check_container
 
   local targets_text
   targets_text="$(expand_targets)" || exit 1
   mapfile -t pids <<< "$targets_text"
+
+  if [[ "$CHECK_UPSTREAM" -eq 1 ]]; then
+    check_upstream_updates "${pids[@]}"
+    return 0
+  fi
+
+  CURL_BIN="$(command -v curl || true)"
+  [[ -n "$CURL_BIN" ]] || fail "Required command not found: curl"
+  require_cmd docker
+  require_cmd jq
+  require_cmd tar
+  check_container
+
   for pid in "${pids[@]}"; do
     process_plugin "$pid"
   done
