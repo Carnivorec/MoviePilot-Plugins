@@ -317,8 +317,10 @@ class Api:
                         user_info=None,
                     )
 
+            request_kwargs = configer.get_ios_ua_app(app=False)
+
             # 获取用户信息
-            user_info_resp = _temp_client.user_my_info()
+            user_info_resp = _temp_client.user_my_info(**request_kwargs)
             if user_info_resp.get("state"):
                 data = user_info_resp.get("data", {})
                 vip_data = data.get("vip", {})
@@ -350,7 +352,7 @@ class Api:
                 )
 
             # 获取空间信息
-            space_info_resp = _temp_client.fs_index_info(payload=0)
+            space_info_resp = _temp_client.fs_index_info(payload=0, **request_kwargs)
             if space_info_resp.get("state"):
                 data = space_info_resp.get("data", {}).get("space_info", {})
                 storage_details_dict = {
@@ -1514,7 +1516,7 @@ class Api:
         if client:
             debug_info.append("   客户端初始化: 是")
             try:
-                test_resp = client.user_my_info()
+                test_resp = client.user_my_info(**configer.get_ios_ua_app(app=False))
                 if test_resp.get("state"):
                     debug_info.append("   客户端可用: 是")
                     user_info = test_resp.get("data", {})

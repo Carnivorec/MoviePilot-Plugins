@@ -931,12 +931,26 @@ class ConfigManager(BaseModel):
             f"{SystemUtils.cpu_arch() if hasattr(SystemUtils, 'cpu_arch') and callable(SystemUtils.cpu_arch) else 'UnknownArch'})"
         )
 
+    def get_p115_request_extensions(self) -> Dict[str, Any]:
+        """
+        获取 115 API 请求扩展参数，避免底层 httpcore 请求长期阻塞。
+        """
+        return {
+            "timeout": {
+                "connect": 10.0,
+                "read": 60.0,
+                "write": 60.0,
+                "pool": 10.0,
+            }
+        }
+
     def get_ios_ua_app(self, app: bool = True) -> Dict[str, Any]:
         """
-        获取 IOS 设备的 header（UA）和 APP
+        获取 IOS 设备的 header（UA）、APP 和请求超时配置。
         """
         kwargs: Dict[str, Any] = {
             "headers": {"user-agent": self.get_user_agent(5)},
+            "extensions": self.get_p115_request_extensions(),
         }
         if app:
             kwargs["app"] = "ios"

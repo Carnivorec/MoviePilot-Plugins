@@ -125,6 +125,10 @@ celerybeat.pid
 
 # Environments
 .env
+
+# Local installer config
+/install_config.env
+/install_config.local.env
 .venv
 env/
 venv/
@@ -168,7 +172,16 @@ test_pluguns/
 # MacOS
 .DS_Store
 
+# Vim swap files
+*.swp
+*.swo
+.*.swp
+.*.swo
+
 # AI
 CLAUDE.md
 !/CLAUDE.md
 .claude/
+
+# Local Codex/Superpowers planning docs
+docs/superpowers/

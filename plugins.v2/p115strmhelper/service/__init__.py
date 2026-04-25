@@ -335,11 +335,9 @@ class ServiceHelper:
             self.monitor_life_thread.start()
             logger.info("【监控生活事件】生活事件监控线程已启动")
             self.monitor_life_fail_time = None
-
-            try:
-                self._update_monitor_life_guard_service()
-            except Exception as e:
-                logger.debug(f"【监控生活事件】重新注册守护服务失败: {e}")
+            logger.debug(
+                "【监控生活事件】守护服务交由 MoviePilot 插件服务注册流程处理"
+            )
         else:
             self._stop_monitor_life_internal()
 
