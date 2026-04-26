@@ -32,6 +32,7 @@ from ..schemas.share import (
 from ..schemas.strm_api import StrmApiConfig
 from ..utils.cron import CronUtils
 from ..utils.machineid import MachineID
+from ..utils.p115_timeout import build_p115_timeout_extensions
 from ..utils.user_agent import UserAgentUtils
 
 
@@ -935,14 +936,7 @@ class ConfigManager(BaseModel):
         """
         获取 115 API 请求扩展参数，避免底层 httpcore 请求长期阻塞。
         """
-        return {
-            "timeout": {
-                "connect": 10.0,
-                "read": 60.0,
-                "write": 60.0,
-                "pool": 10.0,
-            }
-        }
+        return build_p115_timeout_extensions()
 
     def get_ios_ua_app(self, app: bool = True) -> Dict[str, Any]:
         """

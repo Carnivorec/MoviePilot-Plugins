@@ -3,6 +3,7 @@ from random import randint, choice
 from p115client import P115Client, check_response
 
 from app.core.cache import cached
+from .p115_timeout import build_p115_request_kwargs
 
 
 class UserAgentUtils:
@@ -25,7 +26,9 @@ class UserAgentUtils:
         :return: 完整的 User-Agent 字符串
         """
         try:
-            resp = P115Client.app_version_list2()
+            resp = P115Client.app_version_list2(
+                **build_p115_request_kwargs(timeout=10)
+            )
             check_response(resp)
             udown_version = resp["data"]["iOS-iPhone"]["version_code"]
             wangpan_version = resp["data"]["115wangpan_iOS"]["version_code"]

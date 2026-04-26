@@ -22,7 +22,7 @@ from app.modules.filemanager.storages import transfer_process
 from app.schemas import FileItem, StorageUsage
 
 from .cache import IdPathCache, ItemIdCache
-from .tools import RateLimiter, get_ios_ua_app
+from .tools import RateLimiter, get_ios_ua_app, get_p115_request_kwargs
 
 
 class P115Api:
@@ -646,7 +646,9 @@ class P115Api:
             return None
 
         download_url = self.client.download_url(
-            detail.pickcode, user_agent=settings.USER_AGENT
+            detail.pickcode,
+            user_agent=settings.USER_AGENT,
+            **get_p115_request_kwargs(),
         ).geturl()
         if not download_url:
             logger.error(f"【P115Disk】下载链接为空: {fileitem.name}")
@@ -816,6 +818,7 @@ class P115Api:
                         filesha1=file_sha1,
                         pid=target_pid,
                         read_range_bytes_or_hash=read_range_hash,
+                        **get_p115_request_kwargs(),
                     )
                     check_response(init_resp)
                     break

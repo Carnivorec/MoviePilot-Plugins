@@ -339,7 +339,8 @@ class ShareStrmHelper:
                     {
                         "share_code": config.share_code,
                         "receive_code": config.share_receive,
-                    }
+                    },
+                    **configer.get_ios_ua_app(app=False),
                 )
                 check_response(resp)
             except Exception:

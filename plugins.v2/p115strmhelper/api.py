@@ -23,6 +23,7 @@ from .schemas.donate import DEFAULT_DONATE_INFO as DONATE_INFO
 from .core.cache import idpathcacher, DirectoryCache, r302cacher
 from .core.aliyunpan import AliyunPanLogin
 from .core.p115 import get_pid_by_path, get_pickcode_by_path
+from .utils.p115_timeout import build_p115_request_kwargs
 from .helper.life.test import MonitorLifeTest
 from .helper.strm import ApiSyncStrmHelper
 from .schemas.offline import (
@@ -527,13 +528,14 @@ class Api:
                 final_client_type = "alipaymini"
             logger.info(f"【扫码登入】二维码API - 使用客户端类型: {final_client_type}")
 
-            resp = P115Client.login_qrcode_token()
+            request_kwargs = build_p115_request_kwargs(timeout=10)
+            resp = P115Client.login_qrcode_token(**request_kwargs)
             check_response(resp)
             resp_info = resp.get("data", {})
             _uid = str(resp_info.get("uid", ""))
             _time = str(resp_info.get("time", ""))
             _sign = str(resp_info.get("sign", ""))
-            resp = P115Client.login_qrcode(_uid)
+            resp = P115Client.login_qrcode(_uid, **request_kwargs)
             if not isinstance(resp, (bytes, bytearray)):
                 return ApiResponse(code=-1, msg="获取二维码失败: 返回内容类型异常")
             qrcode_base64 = b64encode(resp).decode("utf-8")
@@ -567,7 +569,8 @@ class Api:
                 "time": _time,
                 "sign": sign,
             }
-            resp = P115Client.login_qrcode_scan_status(payload)
+            request_kwargs = build_p115_request_kwargs(timeout=10)
+            resp = P115Client.login_qrcode_scan_status(payload, **request_kwargs)
             if not isinstance(resp, dict):
                 return ApiResponse(code=-1, msg="检查二维码状态异常: 返回数据类型异常")
             check_response(resp)
@@ -592,7 +595,10 @@ class Api:
 
         if status_code == 2:
             try:
-                resp = P115Client.login_qrcode_scan_result(uid, app=client_type)
+                request_kwargs = build_p115_request_kwargs(timeout=10)
+                resp = P115Client.login_qrcode_scan_result(
+                    uid, app=client_type, **request_kwargs
+                )
                 if not isinstance(resp, dict):
                     return ApiResponse(
                         code=-1, msg="获取登录结果失败: 返回数据类型异常"

@@ -36,6 +36,7 @@ from ...core.cache import OofFastMiCache
 from ...utils.url import Url
 from ...utils.sentry import sentry_manager
 from ...utils.exception import DownloadValidationFail
+from ...utils.p115_timeout import build_p115_request_kwargs
 
 
 @sentry_manager.capture_all_class_exceptions
@@ -154,7 +155,10 @@ class MediaInfoDownloader:
         """
         try:
             resp = self.client.download_url_app(
-                pickcode, app="android", user_agent=configer.get_user_agent()
+                pickcode,
+                app="android",
+                user_agent=configer.get_user_agent(),
+                **build_p115_request_kwargs(),
             )
             check_response(resp)
             data = resp["data"]
@@ -609,10 +613,13 @@ class MediaInfoDownloader:
                                     attr["pickcode"],
                                     use_web_api=True,
                                     user_agent=configer.get_user_agent(),
+                                    **build_p115_request_kwargs(),
                                 )
                         else:
                             url = self.client.download_url(
-                                attr["pickcode"], user_agent=configer.get_user_agent()
+                                attr["pickcode"],
+                                user_agent=configer.get_user_agent(),
+                                **build_p115_request_kwargs(),
                             )
                     if url:
                         images[attr["sha1"]] = url
@@ -712,7 +719,9 @@ class MediaInfoDownloader:
                 )
                 pcs = [i["pickcode"] for i in file_info_lst]
                 resp = self.client.download_urls(
-                    ",".join(pcs), user_agent=configer.get_user_agent()
+                    ",".join(pcs),
+                    user_agent=configer.get_user_agent(),
+                    **build_p115_request_kwargs(),
                 )
             except Exception as e:
                 logger.error(f"【媒体信息文件下载】批处理下载文件失败: {e}")
@@ -766,7 +775,9 @@ class MediaInfoDownloader:
                     return
                 pcs = [item["pickcode"] for item in item_list]
                 resp = self.client.download_urls(
-                    ",".join(pcs), user_agent=configer.get_user_agent()
+                    ",".join(pcs),
+                    user_agent=configer.get_user_agent(),
+                    **build_p115_request_kwargs(),
                 )
                 data_map = {key: value.geturl() for key, value in resp.items()}
                 for batch in batched(item_list, self.max_workers):

@@ -582,7 +582,7 @@ make_manual_backup() {
       base="/config/plugin_manual_backups/$PLUGIN_LOWER"
       backup="$base/$TS"
       runtime="/app/app/plugins/$PLUGIN_LOWER"
-      persistent="/config/plugins_backup/$PLUGIN_LOWER"
+      persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
       mkdir -p "$backup"
       if [ -d "$runtime" ]; then
         mkdir -p "$backup/runtime"
@@ -646,7 +646,7 @@ copy_only_install() {
       src="$CONTAINER_REPO_PATH/$PLUGIN_DIR"
       tmp="/tmp/mp-plugin-copy-$PLUGIN_LOWER"
       runtime="/app/app/plugins/$PLUGIN_LOWER"
-      persistent="/config/plugins_backup/$PLUGIN_LOWER"
+      persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
       test -d "$src"
       rm -rf "$tmp"
       mkdir -p "$tmp"
@@ -678,7 +678,7 @@ restore_static_assets_if_needed() {
       source_dist="$CONTAINER_REPO_PATH/$PLUGIN_DIR/dist"
       backup_dist="/config/plugin_manual_backups/$PLUGIN_LOWER/latest/runtime/dist"
       runtime_dist="/app/app/plugins/$PLUGIN_LOWER/dist"
-      persistent_dist="/config/plugins_backup/$PLUGIN_LOWER/dist"
+      persistent_dist="/config/temp/plugin_backup/$PLUGIN_LOWER/dist"
 
       if [ -d "$source_dist" ]; then
         exit 0
@@ -696,6 +696,24 @@ restore_static_assets_if_needed() {
     '
 }
 
+sync_persistent_backup_from_runtime() {
+  local pid="$1"
+  local lower
+  lower="$(plugin_lower_for "$pid")"
+  log "Syncing persistent backup for $pid from runtime"
+  docker exec \
+    -e PLUGIN_LOWER="$lower" \
+    "$CONTAINER_NAME" sh -lc '
+      set -eu
+      runtime="/app/app/plugins/$PLUGIN_LOWER"
+      persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
+      test -d "$runtime"
+      rm -rf "$persistent"
+      mkdir -p "$(dirname "$persistent")"
+      cp -a "$runtime" "$persistent"
+    '
+}
+
 rollback_latest() {
   local pid="$1"
   local lower
@@ -710,7 +728,7 @@ rollback_latest() {
       backup="$(readlink -f "$latest")"
       [ -d "$backup/runtime" ] || { echo "runtime backup not found: $backup" >&2; exit 1; }
       runtime="/app/app/plugins/$PLUGIN_LOWER"
-      persistent="/config/plugins_backup/$PLUGIN_LOWER"
+      persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
       rm -rf "$runtime"
       mkdir -p "$(dirname "$runtime")"
       cp -a "$backup/runtime" "$runtime"
@@ -773,7 +791,7 @@ verify_static_assets() {
     "$CONTAINER_NAME" sh -lc '
       set -eu
       test -f "/app/app/plugins/$PLUGIN_LOWER/dist/assets/remoteEntry.js"
-      test -f "/config/plugins_backup/$PLUGIN_LOWER/dist/assets/remoteEntry.js"
+      test -f "/config/temp/plugin_backup/$PLUGIN_LOWER/dist/assets/remoteEntry.js"
     ' || fail "Missing frontend static assets for $pid"
   log "static assets ok: $pid"
 }
@@ -784,7 +802,7 @@ verify_plugin() {
   lower="$(plugin_lower_for "$pid")"
   expected="$(validate_versions "$pid")"
   runtime_base="/app/app/plugins/$lower"
-  backup_base="/config/plugins_backup/$lower"
+  backup_base="/config/temp/plugin_backup/$lower"
   runtime_version="$(container_version_for "$pid" "$runtime_base")" || fail "Cannot read runtime version for $pid"
   [[ "$runtime_version" == "$expected" ]] || fail "Runtime version mismatch for $pid: expected=$expected actual=$runtime_version"
   backup_version="$(container_version_for "$pid" "$backup_base")" || fail "Cannot read persistent backup version for $pid"
@@ -799,7 +817,7 @@ verify_plugin_consistent() {
   local lower runtime_version backup_version runtime_base backup_base
   lower="$(plugin_lower_for "$pid")"
   runtime_base="/app/app/plugins/$lower"
-  backup_base="/config/plugins_backup/$lower"
+  backup_base="/config/temp/plugin_backup/$lower"
   runtime_version="$(container_version_for "$pid" "$runtime_base")" || fail "Cannot read runtime version for $pid"
   backup_version="$(container_version_for "$pid" "$backup_base")" || fail "Cannot read persistent backup version for $pid"
   [[ "$runtime_version" == "$backup_version" ]] || fail "Rollback version mismatch for $pid: runtime=$runtime_version backup=$backup_version"
@@ -818,7 +836,7 @@ print_plan_for_plugin() {
   printf 'Version: %s\n' "$version"
   printf 'Source: %s\n' "$dir"
   printf 'Runtime: /app/app/plugins/%s\n' "$lower"
-  printf 'Backup: /config/plugins_backup/%s\n' "$lower"
+  printf 'Backup: /config/temp/plugin_backup/%s\n' "$lower"
 }
 
 process_plugin() {
@@ -851,6 +869,7 @@ process_plugin() {
     install_with_plugin_helper "$pid"
   fi
   restore_static_assets_if_needed "$pid"
+  sync_persistent_backup_from_runtime "$pid"
   reload_plugin "$pid"
   verify_plugin "$pid"
 }

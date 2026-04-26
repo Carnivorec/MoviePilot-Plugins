@@ -22,6 +22,16 @@ def get_p115_request_extensions() -> Dict[str, Any]:
     }
 
 
+def get_p115_request_kwargs() -> Dict[str, Any]:
+    """
+    获取不带 UA/App 的 115 API 请求超时参数。
+    """
+    return {
+        "extensions": get_p115_request_extensions(),
+        "timeout": 60.0,
+    }
+
+
 def get_ios_ua_app(app: bool = True) -> Dict[str, Any]:
     """
     获取 IOS 设备的 header（UA）、APP 和请求超时配置。
