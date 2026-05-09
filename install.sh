@@ -356,8 +356,12 @@ require_cmd() {
 }
 
 check_repo() {
+  local repo_top
+
   cd "$REPO_DIR"
-  [[ -d .git ]] || fail "Not a git repository root: $REPO_DIR"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Not a git repository root: $REPO_DIR"
+  repo_top="$(git rev-parse --show-toplevel)"
+  [[ "$repo_top" == "$REPO_DIR" ]] || fail "Not a git repository root: $REPO_DIR"
   [[ -f package.v2.json ]] || fail "package.v2.json not found"
   [[ -d plugins.v2 ]] || fail "plugins.v2 not found"
 

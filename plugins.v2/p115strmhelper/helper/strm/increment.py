@@ -40,6 +40,7 @@ from ...utils.automaton import AutomatonUtils
 from ...utils.mediainfo_download import MediainfoDownloadMiddleware
 from ...utils.base64 import CBase64
 from ...utils.math import MathUtils
+from ...utils.increment_path_pair import select_pan_path_for_local_path
 
 
 class IncrementSyncStrmHelper:
@@ -150,6 +151,7 @@ class IncrementSyncStrmHelper:
         self.pan_to_local_tree = DirectoryTree(self.pan_to_local_tree_path)
         self.local_strm_tree = DirectoryTree(self.local_strm_tree_path)
         self.pan_to_local_strm_tree = DirectoryTree(self.pan_to_local_strm_tree_path)
+        self.pan_paths_by_local_path: Dict[str, List[str]] = {}
 
     def __del__(self):
         self.directory_cache.close()
@@ -436,18 +438,24 @@ class IncrementSyncStrmHelper:
             self.pan_tree.clear()
             self.pan_to_local_tree.clear()
             self.pan_to_local_strm_tree.clear()
+            self.pan_paths_by_local_path.clear()
 
             logger.info(f"【增量STRM生成】开始生成网盘目录树: {pan_media_dir}")
 
             try:
-                for path1, path2 in self.__itertree(
+                for local_path_str, pan_path_str in self.__itertree(
                     pan_path=pan_media_dir, local_path=target_dir
                 ):
-                    self.pan_to_local_tree.generate_tree_from_list([path1], append=True)
-                    self.pan_tree.generate_tree_from_list([path2], append=True)
-                    if Path(path1).suffix.lower() == ".strm":
+                    self.pan_to_local_tree.generate_tree_from_list(
+                        [local_path_str], append=True
+                    )
+                    self.pan_tree.generate_tree_from_list([pan_path_str], append=True)
+                    self.pan_paths_by_local_path.setdefault(
+                        local_path_str, []
+                    ).append(pan_path_str)
+                    if Path(local_path_str).suffix.lower() == ".strm":
                         self.pan_to_local_strm_tree.generate_tree_from_list(
-                            [path1], append=True
+                            [local_path_str], append=True
                         )
 
                 logger.info(f"【增量STRM生成】网盘目录树生成完成: {pan_media_dir}")
@@ -471,6 +479,52 @@ class IncrementSyncStrmHelper:
             raise ItertreeInternalError(
                 f"网盘目录树生成失败: {pan_media_dir}"
             ) from last_error
+
+    def __record_path_pair_error(self, local_path: str, reason: str) -> None:
+        """
+        记录路径配对异常，并阻止本轮无效 STRM 清理
+        """
+        local_suffix = Path(local_path).suffix.lower()
+        if local_suffix == ".strm":
+            self.strm_fail_count += 1
+        else:
+            self.mediainfo_fail_count += 1
+            self.mediainfo_fail_dict.append(local_path)
+        self.strm_fail_dict[local_path] = f"路径配对异常：{reason}"
+
+    def __iter_addition_path_pairs(self) -> Iterator[Tuple[str, str]]:
+        """
+        按本地目标路径迭代新增文件配对，避免两棵目录树错位
+        """
+        logger.info("【增量STRM生成】开始按本地目标路径匹配新增文件")
+        try:
+            for local_path_str in self.pan_to_local_tree.compare_trees(self.local_tree):
+                decision = select_pan_path_for_local_path(
+                    local_path=local_path_str,
+                    pan_paths=self.pan_paths_by_local_path.get(local_path_str, []),
+                    media_extensions=self.rmt_mediaext,
+                    download_extensions=self.download_mediaext,
+                    auto_download_mediainfo=self.auto_download_mediainfo,
+                )
+                if not decision.should_process or not decision.pan_path:
+                    logger.error(
+                        "【增量STRM生成】跳过异常增量路径配对: %s，原因: %s",
+                        local_path_str,
+                        decision.reason,
+                    )
+                    self.__record_path_pair_error(local_path_str, decision.reason)
+                    continue
+                if decision.duplicate_count > 1:
+                    logger.warning(
+                        "【增量STRM生成】本地目标路径存在 %s 个网盘源路径，沿用首个源路径: %s -> %s",
+                        decision.duplicate_count,
+                        decision.local_path,
+                        decision.pan_path,
+                    )
+                self.total_iterated += 1
+                yield decision.pan_path, decision.local_path
+        finally:
+            logger.info("【增量STRM生成】按本地目标路径匹配新增文件完成")
 
     def __handle_addition_path(self, pan_path: str, local_path: str):
         """
@@ -792,19 +846,14 @@ class IncrementSyncStrmHelper:
                         logger.error(f"【增量STRM生成】{path} 目录树生成错误")
                     else:
                         # 生成或者下载文件
-                        for line in self.pan_to_local_tree.compare_trees_lines(
-                            self.local_tree
-                        ):
-                            pan_path_str = self.pan_tree.get_path_by_line_number(line)
-                            local_path_str = (
-                                self.pan_to_local_tree.get_path_by_line_number(line)
+                        for (
+                            pan_path_str,
+                            local_path_str,
+                        ) in self.__iter_addition_path_pairs():
+                            self.__handle_addition_path(
+                                pan_path=pan_path_str,
+                                local_path=local_path_str,
                             )
-                            if pan_path_str and local_path_str:
-                                self.total_iterated += 1
-                                self.__handle_addition_path(
-                                    pan_path=pan_path_str,
-                                    local_path=local_path_str,
-                                )
 
                         # 清理无效 STRM 文件
                         if self.remove_unless_strm:
@@ -920,12 +969,21 @@ class IncrementSyncStrmHelper:
                     sleep(wait_seconds)
 
             # 下载媒体信息文件
+            path_pair_mediainfo_fail_count = self.mediainfo_fail_count
+            path_pair_mediainfo_fail_dict = list(self.mediainfo_fail_dict)
             (
-                self.mediainfo_count,
-                self.mediainfo_fail_count,
-                self.mediainfo_fail_dict,
+                downloaded_count,
+                download_fail_count,
+                download_fail_dict,
             ) = self.mediainfodownloader.batch_auto_downloader(
                 downloads_list=self.download_mediainfo_list
+            )
+            self.mediainfo_count = downloaded_count
+            self.mediainfo_fail_count = (
+                path_pair_mediainfo_fail_count + download_fail_count
+            )
+            self.mediainfo_fail_dict = path_pair_mediainfo_fail_dict + list(
+                download_fail_dict or []
             )
 
             # 日志输出
