@@ -7,7 +7,7 @@ from queue import Empty, Queue
 from tempfile import gettempdir
 from threading import Lock, Thread
 from time import perf_counter, sleep
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from p115client import check_response
 from p115client.util import share_extract_payload
@@ -552,6 +552,9 @@ class ShareInteractiveGenStrmQueue:
 
     def __init__(self) -> None:
         self.mediainfodownloader: Optional[MediaInfoDownloader] = None
+        self.mediainfo_downloader_factory: Optional[
+            Callable[[str], MediaInfoDownloader]
+        ] = None
         self._task_queue: Queue = Queue()
         self._worker_thread: Optional[Thread] = None
         self._worker_lock = Lock()
@@ -565,6 +568,16 @@ class ShareInteractiveGenStrmQueue:
         :param mediainfodownloader: MediaInfoDownloader 实例，可为 None
         """
         self.mediainfodownloader = mediainfodownloader
+
+    def bind_mediainfo_downloader_factory(
+        self, factory: Optional[Callable[[str], MediaInfoDownloader]]
+    ) -> None:
+        """
+        绑定媒体信息下载器工厂
+
+        :param factory: 接收任务名称并返回 MediaInfoDownloader 的工厂，可为 None
+        """
+        self.mediainfo_downloader_factory = factory
 
     @staticmethod
     def validate_prerequisites() -> Optional[str]:
@@ -668,7 +681,17 @@ class ShareInteractiveGenStrmQueue:
             )
             return
 
-        if not self.mediainfodownloader:
+        mediainfo_downloader: Optional[MediaInfoDownloader] = None
+        own_downloader = False
+        if self.mediainfo_downloader_factory:
+            mediainfo_downloader = self.mediainfo_downloader_factory(
+                "分享交互生成STRM"
+            )
+            own_downloader = True
+        else:
+            mediainfo_downloader = self.mediainfodownloader
+
+        if not mediainfo_downloader:
             logger.error("【分享交互生成STRM】MediaInfoDownloader 未初始化")
             self._post_user_message(
                 channel=channel,
@@ -682,31 +705,36 @@ class ShareInteractiveGenStrmQueue:
             )
             return
 
-        g = configer.share_interactive_gen_strm_config
-        virtual = ShareStrmConfig(
-            enabled=True,
-            comment="分享交互生成STRM",
-            share_link=share_url,
-            share_path="/",
-            local_path=(g.local_path or "").strip(),
-            min_file_size=g.min_file_size,
-            auto_download_mediainfo=g.auto_download_mediainfo,
-            moviepilot_transfer=g.moviepilot_transfer,
-            moviepilot_transfer_download_rmt_audio_sub=(
-                g.moviepilot_transfer_download_rmt_audio_sub
-            ),
-            speed_mode=g.speed_mode,
-            scrape_metadata=False,
-            media_server_refresh=False,
-        )
+        try:
+            g = configer.share_interactive_gen_strm_config
+            virtual = ShareStrmConfig(
+                enabled=True,
+                comment="分享交互生成STRM",
+                share_link=share_url,
+                share_path="/",
+                local_path=(g.local_path or "").strip(),
+                min_file_size=g.min_file_size,
+                auto_download_mediainfo=g.auto_download_mediainfo,
+                moviepilot_transfer=g.moviepilot_transfer,
+                moviepilot_transfer_download_rmt_audio_sub=(
+                    g.moviepilot_transfer_download_rmt_audio_sub
+                ),
+                speed_mode=g.speed_mode,
+                scrape_metadata=False,
+                media_server_refresh=False,
+            )
 
-        strm_helper = ShareStrmHelper(mediainfodownloader=self.mediainfodownloader)
-        strm_helper.strm_exec_history_kind = "share_interactive"
-        strm_helper.strm_exec_history_extra = {"share_url": share_url}
-        strm_helper.generate_strm_files_for_configs([virtual])
-        strm_count, mediainfo_count, strm_fail_count, mediainfo_fail_count = (
-            strm_helper.get_generate_total()
-        )
+            strm_helper = ShareStrmHelper(mediainfodownloader=mediainfo_downloader)
+            strm_helper.strm_exec_history_kind = "share_interactive"
+            strm_helper.strm_exec_history_extra = {"share_url": share_url}
+            strm_helper.generate_strm_files_for_configs([virtual])
+            strm_count, mediainfo_count, strm_fail_count, mediainfo_fail_count = (
+                strm_helper.get_generate_total()
+            )
+        finally:
+            if own_downloader and mediainfo_downloader:
+                mediainfo_downloader.close()
+                logger.info("【分享交互生成STRM】独立媒体信息下载器已释放")
 
         detail = (
             f"\n📄 生成STRM文件 {strm_count} 个\n"

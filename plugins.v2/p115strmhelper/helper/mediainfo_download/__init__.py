@@ -2,6 +2,7 @@ from asyncio import Semaphore, gather, run as asyncio_run, sleep as asyncio_slee
 from base64 import b64decode
 from itertools import batched
 from pathlib import Path
+from threading import Lock
 from time import sleep as time_sleep
 from typing import Dict, Generator, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlsplit
@@ -82,6 +83,9 @@ class MediaInfoDownloader:
         self.stop_all_flag = None
 
         self._pending_delete_scids: List[int] = []
+        self._pending_delete_task_types: List[str] = []
+        self._state_lock = Lock()
+        self._closed = False
 
         self.mediainfo_count: int = 0
         self.mediainfo_fail_count: int = 0
@@ -90,7 +94,22 @@ class MediaInfoDownloader:
         logger.debug(f"【媒体信息文件下载】初始化请求头：{self.headers}")
 
     def __del__(self):
-        self.oof_fast_mi_cacher.close()
+        self.close()
+
+    def close(self) -> None:
+        """
+        释放下载器持有的本地缓存句柄
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        cacher = getattr(self, "oof_fast_mi_cacher", None)
+        if not cacher:
+            return
+        try:
+            cacher.close()
+        except Exception as e:
+            logger.debug(f"【媒体信息文件下载】关闭 OOF 本地缓存句柄失败: {e}")
 
     def _record_mediainfo_success(self) -> None:
         """
@@ -168,11 +187,14 @@ class MediaInfoDownloader:
             return None
         return Url.of(data["url"], data)
 
-    def _batch_fs_delete(self, scids: List) -> None:
+    def _batch_fs_delete(
+        self, scids: List, task_type: str = "媒体信息文件下载"
+    ) -> None:
         """
         对一批 scid 执行 fs_delete，使用 check_response 校验结果，最多重试 3 次
 
         :param scids: 待删除的文件夹 id 列表（≤ 50 个）
+        :param task_type: 创建这些临时目录的任务类型
         """
         for attempt in range(3):
             try:
@@ -180,17 +202,33 @@ class MediaInfoDownloader:
                     scids, **configer.get_ios_ua_app(app=False)
                 )
                 check_response(resp)
+                logger.info(
+                    f"【媒体信息文件下载】{task_type} 临时目录删除成功: {len(scids)} 个"
+                )
                 return
             except Exception as e:
                 logger.warning(
                     f"【媒体信息文件下载】批量删除临时目录失败 "
-                    f"(尝试 {attempt + 1}/3)，scids={scids}，原因: {e}"
+                    f"(尝试 {attempt + 1}/3)，类型={task_type}，scids={scids}，原因: {e}"
                 )
                 if attempt < 2:
                     time_sleep(2 + 2**attempt)
         logger.error(
-            f"【媒体信息文件下载】批量删除临时目录在 3 次尝试后仍失败，scids={scids}"
+            f"【媒体信息文件下载】批量删除临时目录在 3 次尝试后仍失败，"
+            f"类型={task_type}，数量={len(scids)}，scids={scids}"
         )
+
+    def _queue_pending_delete(
+        self, scid: int, task_type: str = "媒体信息文件下载"
+    ) -> None:
+        """
+        将当前批次创建的 115 临时目录加入当前下载任务清理清单
+
+        :param scid: 临时目录 ID
+        :param task_type: 创建该目录的任务类型
+        """
+        self._pending_delete_scids.append(scid)
+        self._pending_delete_task_types.append(task_type)
 
     def _flush_pending_deletes(self, *, force: bool = False) -> None:
         """
@@ -200,8 +238,29 @@ class MediaInfoDownloader:
         """
         while len(self._pending_delete_scids) >= (1 if force else 50):
             batch = self._pending_delete_scids[:50]
+            batch_task_types = self._pending_delete_task_types[:50]
             self._pending_delete_scids = self._pending_delete_scids[50:]
-            self._batch_fs_delete(batch)
+            self._pending_delete_task_types = self._pending_delete_task_types[50:]
+            task_type = "、".join(sorted(set(batch_task_types))) or "媒体信息文件下载"
+            self._batch_fs_delete(batch, task_type=task_type)
+
+    def _reset_download_run_state(self, task_type: str, downloads_list: List) -> None:
+        """
+        初始化单次媒体信息下载任务的运行状态
+
+        :param task_type: 当前下载任务类型
+        :param downloads_list: 当前任务待处理文件清单
+        """
+        self.stop_all_flag = False
+        self.mediainfo_count = 0
+        self.mediainfo_fail_count = 0
+        self.mediainfo_fail_dict = []
+        self._pending_delete_scids = []
+        self._pending_delete_task_types = []
+        logger.info(
+            f"【媒体信息文件下载】{task_type} 下载任务状态已初始化，"
+            f"待处理 {len(downloads_list)} 个文件"
+        )
 
     def save_oof_mediainfo_file(
         self, item_list: List | Tuple, json_data: Dict, key: str
@@ -514,7 +573,7 @@ class MediaInfoDownloader:
                     logger.error(f"【媒体信息文件下载】批处理字幕异步下载失败: {e}")
                     self._record_failures_for_items(item_list)
             finally:
-                self._pending_delete_scids.append(scid)
+                self._queue_pending_delete(scid, "字幕")
                 self._flush_pending_deletes()
 
     def batch_share_subtitle_downloader(self, downloads_list: List):
@@ -571,7 +630,7 @@ class MediaInfoDownloader:
                     logger.error(f"【媒体信息文件下载】批处理字幕异步下载失败: {e}")
                     self._record_failures_for_items(item_list)
             finally:
-                self._pending_delete_scids.append(scid)
+                self._queue_pending_delete(scid, "分享字幕")
                 self._flush_pending_deletes()
 
     def batch_image_downloader(self, downloads_list: List):
@@ -635,7 +694,7 @@ class MediaInfoDownloader:
                     logger.error(f"【媒体信息文件下载】批处理图片异步下载失败: {e}")
                     self._record_failures_for_items(item_list)
             finally:
-                self._pending_delete_scids.append(scid)
+                self._queue_pending_delete(scid, "图片")
                 self._flush_pending_deletes()
 
     def batch_oof_fast_mi_downloader(
@@ -754,7 +813,7 @@ class MediaInfoDownloader:
                             upload_lst.extend(r_lst)
                     time_sleep(1)
             finally:
-                self._pending_delete_scids.append(scid)
+                self._queue_pending_delete(scid, "分享文件")
                 self._flush_pending_deletes()
 
         if oof_upload and upload_lst:
@@ -805,90 +864,97 @@ class MediaInfoDownloader:
         """
         根据列表自动批量下载
         """
-        image_suffix: Set[str] = set(TYPE_TO_SUFFIXES[2])
-        subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
-        oof_fast_mi_suffix: Set[str] = {".nfo"}
+        with self._state_lock:
+            image_suffix: Set[str] = set(TYPE_TO_SUFFIXES[2])
+            subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
+            oof_fast_mi_suffix: Set[str] = {".nfo"}
 
-        self.stop_all_flag = False
-        self.mediainfo_count: int = 0
-        self.mediainfo_fail_count: int = 0
-        self.mediainfo_fail_dict: List = []
-        self._pending_delete_scids = []
+            self._reset_download_run_state("普通媒体信息", downloads_list)
 
-        image_list: List = []
-        subtitle_list: List = []
-        oof_fast_mi_list: List = []
-        other_list: List = []
+            image_list: List = []
+            subtitle_list: List = []
+            oof_fast_mi_list: List = []
+            other_list: List = []
 
-        subtitle_list_append = subtitle_list.append
-        image_list_append = image_list.append
-        oof_fast_mi_append = oof_fast_mi_list.append
-        other_list_append = other_list.append
+            subtitle_list_append = subtitle_list.append
+            image_list_append = image_list.append
+            oof_fast_mi_append = oof_fast_mi_list.append
+            other_list_append = other_list.append
 
-        for item in downloads_list:
-            suffix = Path(item["path"]).suffix
-            if suffix in subtitle_suffix:
-                subtitle_list_append(item)
-            elif suffix in image_suffix:
-                image_list_append(item)
-            elif suffix in oof_fast_mi_suffix:
-                oof_fast_mi_append(item)
-            else:
-                other_list_append(item)
+            for item in downloads_list:
+                suffix = Path(item["path"]).suffix
+                if suffix in subtitle_suffix:
+                    subtitle_list_append(item)
+                elif suffix in image_suffix:
+                    image_list_append(item)
+                elif suffix in oof_fast_mi_suffix:
+                    oof_fast_mi_append(item)
+                else:
+                    other_list_append(item)
 
-        if subtitle_list and not self.stop_all_flag:
-            self.batch_subtitle_downloader(subtitle_list)
-        if image_list and not self.stop_all_flag:
-            self.batch_image_downloader(image_list)
-        if oof_fast_mi_list and not self.stop_all_flag:
-            self.batch_oof_fast_mi_downloader(oof_fast_mi_list, u115_share=False)
-        if other_list and not self.stop_all_flag:
-            self.batch_downloader(other_list)
-
-        self._flush_pending_deletes(force=True)
-        return self.mediainfo_count, self.mediainfo_fail_count, self.mediainfo_fail_dict
+            try:
+                if subtitle_list and not self.stop_all_flag:
+                    self.batch_subtitle_downloader(subtitle_list)
+                if image_list and not self.stop_all_flag:
+                    self.batch_image_downloader(image_list)
+                if oof_fast_mi_list and not self.stop_all_flag:
+                    self.batch_oof_fast_mi_downloader(
+                        oof_fast_mi_list, u115_share=False
+                    )
+                if other_list and not self.stop_all_flag:
+                    self.batch_downloader(other_list)
+            finally:
+                self._flush_pending_deletes(force=True)
+            return (
+                self.mediainfo_count,
+                self.mediainfo_fail_count,
+                self.mediainfo_fail_dict,
+            )
 
     def batch_auto_share_downloader(self, downloads_list: List):
         """
         根据列表自动批量分享下载
         """
-        subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
-        oof_fast_mi_suffix: Set[str] = {".nfo"}
+        with self._state_lock:
+            subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
+            oof_fast_mi_suffix: Set[str] = {".nfo"}
 
-        self.mediainfo_count: int = 0
-        self.mediainfo_fail_count: int = 0
-        self.mediainfo_fail_dict: List = []
-        self._pending_delete_scids = []
+            self._reset_download_run_state("分享媒体信息", downloads_list)
 
-        image_list: List = []
-        subtitle_list: List = []
-        oof_fast_mi_list: List = []
-        other_list: List = []
+            image_list: List = []
+            subtitle_list: List = []
+            oof_fast_mi_list: List = []
+            other_list: List = []
 
-        subtitle_list_append = subtitle_list.append
-        image_list_append = image_list.append
-        oof_fast_mi_append = oof_fast_mi_list.append
-        other_list_append = other_list.append
+            subtitle_list_append = subtitle_list.append
+            image_list_append = image_list.append
+            oof_fast_mi_append = oof_fast_mi_list.append
+            other_list_append = other_list.append
 
-        for item in downloads_list:
-            suffix = Path(item["path"]).suffix
-            if item.get("thumb"):
-                image_list_append(item)
-            elif suffix in subtitle_suffix:
-                subtitle_list_append(item)
-            elif suffix in oof_fast_mi_suffix:
-                oof_fast_mi_append(item)
-            else:
-                other_list_append(item)
+            for item in downloads_list:
+                suffix = Path(item["path"]).suffix
+                if item.get("thumb"):
+                    image_list_append(item)
+                elif suffix in subtitle_suffix:
+                    subtitle_list_append(item)
+                elif suffix in oof_fast_mi_suffix:
+                    oof_fast_mi_append(item)
+                else:
+                    other_list_append(item)
 
-        if image_list:
-            asyncio_run(self.__async_download_batch_share(image_list))
-        if subtitle_list:
-            self.batch_share_subtitle_downloader(subtitle_list)
-        if oof_fast_mi_list:
-            self.batch_oof_fast_mi_downloader(oof_fast_mi_list, u115_share=True)
-        if other_list:
-            self.batch_share_downloader(other_list)
-
-        self._flush_pending_deletes(force=True)
-        return self.mediainfo_count, self.mediainfo_fail_count, self.mediainfo_fail_dict
+            try:
+                if image_list:
+                    asyncio_run(self.__async_download_batch_share(image_list))
+                if subtitle_list:
+                    self.batch_share_subtitle_downloader(subtitle_list)
+                if oof_fast_mi_list:
+                    self.batch_oof_fast_mi_downloader(oof_fast_mi_list, u115_share=True)
+                if other_list:
+                    self.batch_share_downloader(other_list)
+            finally:
+                self._flush_pending_deletes(force=True)
+            return (
+                self.mediainfo_count,
+                self.mediainfo_fail_count,
+                self.mediainfo_fail_dict,
+            )
