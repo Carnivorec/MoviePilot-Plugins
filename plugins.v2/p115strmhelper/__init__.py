@@ -18,6 +18,7 @@ from app.schemas import (
 )
 from app.core.meta import MetaVideo
 from app.schemas.types import EventType, MessageChannel, ChainEventType, MediaType
+from app.helper.directory import DirectoryHelper
 from app.chain.storage import StorageChain
 
 from apscheduler.triggers.cron import CronTrigger
@@ -661,6 +662,27 @@ class P115StrmHelper(_PluginBase):
                 "auth": "bear",
                 "summary": "获取 FUSE 状态",
             },
+            {
+                "path": "/trigger_backup",
+                "endpoint": self.api.trigger_backup_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "手动触发 STRM 备份任务",
+            },
+            {
+                "path": "/list_backups",
+                "endpoint": self.api.list_backups_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "列出 STRM 备份文件",
+            },
+            {
+                "path": "/restore_backup",
+                "endpoint": self.api.restore_backup_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "从 STRM 备份恢复",
+            },
         ]
         if getattr(self, "mcp_manager", None) is not None:
             apis.extend(
@@ -834,6 +856,22 @@ class P115StrmHelper(_PluginBase):
                     "kwargs": {},
                 }
             )
+        if configer.strm_backup_enabled and configer.strm_backup_items:
+            for backup_item in configer.strm_backup_items:
+                if (
+                    backup_item.enabled
+                    and backup_item.timing_enabled
+                    and backup_item.cron
+                ):
+                    cron_service.append(
+                        {
+                            "id": f"P115StrmHelper_strm_backup_{backup_item.name}",
+                            "name": f"STRM 定时备份-{backup_item.name}",
+                            "trigger": CronTrigger.from_crontab(backup_item.cron),
+                            "func": servicer.run_backup_task,
+                            "kwargs": {"task_name": backup_item.name},
+                        }
+                    )
         if cron_service:
             return cron_service
 
@@ -1864,6 +1902,33 @@ class P115StrmHelper(_PluginBase):
         media_title = getattr(mediainfo, "title", "") or ""
         data.reason = f"媒体库已存在：{media_title}（{exist_info.server}）"
         logger.info(f"【媒体库存在拦截】拦截整理 {data.fileitem.path}，{data.reason}")
+
+        try:
+            target_path = data.target_path
+            if target_path.suffix:
+                rename_format = settings.RENAME_FORMAT(getattr(mediainfo, "type", None))
+                dir_to_clean = DirectoryHelper.get_media_root_path(
+                    rename_format, target_path
+                )
+            else:
+                dir_to_clean = target_path
+            if not dir_to_clean:
+                return
+            storage_chain = StorageChain()
+            dir_item = storage_chain.get_file_item(
+                storage=data.target_storage,
+                path=dir_to_clean,
+            )
+            if dir_item and dir_item.type == "dir":
+                files = storage_chain.list_files(dir_item)
+                if files is not None and not files:
+                    storage_chain.delete_file(dir_item)
+                    logger.info(f"【媒体库存在拦截】已清理空目录: {dir_to_clean}")
+        except Exception as e:
+            logger.debug(
+                f"【媒体库存在拦截】清理空目录异常: {e}",
+                exc_info=True,
+            )
 
     @eventmanager.register(ChainEventType.TransferOverwriteCheck)
     def share_strm_overwrite_check(self, event: Event) -> None:

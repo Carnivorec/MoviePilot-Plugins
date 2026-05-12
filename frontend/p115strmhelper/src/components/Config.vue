@@ -177,11 +177,11 @@
           </div>
         </transition>
       </v-card-text>
-      <v-card-actions class="px-3 py-2 d-flex" style="flex-shrink: 0;">
+      <v-card-actions class="px-3 py-2 d-flex config-actions" style="flex-shrink: 0;">
         <v-btn color="warning" variant="text" @click="emit('switch')" size="small" prepend-icon="mdi-arrow-left">
           返回
         </v-btn>
-        <v-spacer></v-spacer>
+        <v-spacer class="config-actions-spacer"></v-spacer>
         <v-btn color="primary" variant="text" @click="openDonateDialog" size="small" prepend-icon="mdi-gift">
           捐赠
         </v-btn>
@@ -1813,12 +1813,30 @@ provide('machineId', machineId);
   max-height: 85vh;
 }
 
+.config-actions {
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.config-actions :deep(.v-btn) {
+  flex: 0 0 auto;
+}
+
 @media (max-width: 768px) {
   .config-main-card {
     flex: 1;
     min-height: 0;
     max-height: none;
     height: 100%;
+  }
+
+  .config-actions {
+    flex-wrap: wrap;
+  }
+
+  .config-actions-spacer {
+    display: none;
   }
 }
 

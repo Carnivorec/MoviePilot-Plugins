@@ -80,12 +80,15 @@ class EmbyOperate:
             )
             return None
 
-    def get_item_id_by_path(self, name: str, path: str) -> Optional[str]:
+    def get_item_id_by_path(
+        self, name: str, path: str, log_warning: bool = True
+    ) -> Optional[str]:
         """
         依据路径获取 Emby 项目 ID
 
         :param name: Emby Server Name
         :param path: 项目路径
+        :param log_warning: 是否输出 warn 日志，当在遍历父目录等场景下可设为 False
 
         :return: 项目 ID
         """
@@ -108,9 +111,14 @@ class EmbyOperate:
                     for item in items:
                         if item.get("Path") == path:
                             return item.get("Id")
-                    logger.warning(
-                        f"{self.func_name}无法获取项目 Id，未匹配到路径 name={name!r} path={path!r}"
-                    )
+                    if log_warning:
+                        logger.warning(
+                            f"{self.func_name}无法获取项目 Id，未匹配到路径 name={name!r} path={path!r}"
+                        )
+                    else:
+                        logger.debug(
+                            f"{self.func_name}未匹配到路径 name={name!r} path={path!r}"
+                        )
                 else:
                     logger.warning(
                         f"{self.func_name}获取项目 Id 失败，Emby 未返回有效响应 name={name!r} path={path!r}"
@@ -202,7 +210,9 @@ class EmbyOperate:
         for parent in path_obj.parents:
             if len(parent.parts) <= 1:
                 break
-            item_id = self.get_item_id_by_path(name, parent.as_posix())
+            item_id = self.get_item_id_by_path(
+                name, parent.as_posix(), log_warning=False
+            )
             if not item_id:
                 continue
             return self.trigger_refresh_by_id(
@@ -387,7 +397,9 @@ class EmbyMediaInfoOperate:
             logger.info(f"{self.func_name}提取媒体信息目录: {file_path}")
 
         for service_name, _ in media_server.items():
-            item_id = self.emby_operate.get_item_id_by_path(service_name, file_path)
+            item_id = self.emby_operate.get_item_id_by_path(
+                service_name, file_path, log_warning=False
+            )
             if not item_id:
                 sleep(10)
                 if self.emby_operate.trigger_refresh_by_path(service_name, file_path):
@@ -473,7 +485,9 @@ class EmbyMediaInfoOperate:
                 logger.info(
                     f"{self.func_name}尝试获取媒体 Id 提取媒体信息: {file_path}"
                 )
-                item_id = self.emby_operate.get_item_id_by_path(service_name, file_path)
+                item_id = self.emby_operate.get_item_id_by_path(
+                    service_name, file_path, log_warning=False
+                )
                 if not item_id:
                     sleep(10)
                     if self.emby_operate.trigger_refresh_by_path(
@@ -536,19 +550,19 @@ class EmbyMediainfoQueue:
         """
         队列 worker
         """
-        if self._queue is None:
+        q = self._queue
+        if q is None:
             return
         while True:
             try:
-                task = self._queue.get()
+                task = q.get()
             except Exception as e:
                 logger.error(
                     f"【Emby 媒体信息队列】worker 取任务异常: {e}", exc_info=True
                 )
                 continue
             if task is self._SENTINEL:
-                if self._queue is not None:
-                    self._queue.task_done()
+                q.task_done()
                 break
             try:
                 path = task.path if isinstance(task.path, Path) else Path(task.path)
@@ -571,8 +585,7 @@ class EmbyMediainfoQueue:
                     exc_info=True,
                 )
             finally:
-                if self._queue is not None:
-                    self._queue.task_done()
+                q.task_done()
                 sleep(self._TASK_SLEEP_AFTER_SEC)
 
     def start(self) -> None:
@@ -630,13 +643,14 @@ class EmbyMediainfoQueue:
         :param mediaservers: 媒体服务器名称列表，可选
         :param size: 文件大小（字节），可选
         """
-        if self._queue is None:
+        q = self._queue
+        if q is None:
             logger.warning(
                 "【Emby 媒体信息队列】队列未初始化，请先启动 worker，跳过入队"
             )
             return
         try:
-            self._queue.put(
+            q.put(
                 EmbyMediainfoTask(
                     func_name=func_name,
                     mp_mediaserver=mp_mediaserver,
