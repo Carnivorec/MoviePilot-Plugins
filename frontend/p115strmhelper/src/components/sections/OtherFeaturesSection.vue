@@ -16,6 +16,9 @@
       <v-tab value="tab-hdhive-checkin" class="sub-tab">
         <v-icon size="small" start>mdi-calendar-check</v-icon>HDHive 签到
       </v-tab>
+      <v-tab value="tab-p115-checkin" class="sub-tab">
+        <v-icon size="small" start>mdi-check-circle-outline</v-icon>115 签到
+      </v-tab>
       <v-tab value="tab-utility" class="sub-tab">
         <v-icon size="small" start>mdi-toolbox</v-icon>实用工具
       </v-tab>
@@ -147,7 +150,7 @@
             </v-card-text>
           </v-card>
 
-          <v-card variant="outlined" class="mt-4">
+          <!-- <v-card variant="outlined" class="mt-4">
             <v-card-item>
               <v-card-title class="d-flex align-center">
                 <v-icon start>mdi-api</v-icon>
@@ -155,15 +158,40 @@
               </v-card-title>
             </v-card-item>
             <v-card-text>
-              <v-text-field v-model="config.hdhive_api_key" label="HDHive API Key" placeholder="在 HDHive 控制台获取 API Key"
-                density="compact" variant="outlined" type="password" autocomplete="new-password" clearable />
+              <v-alert v-if="oauth.status?.auth_mode === 'oauth'" type="success" variant="tonal" density="compact" class="mb-3">
+                <div class="text-caption">
+                  已 OAuth 授权
+                  <span v-if="oauth.status?.user?.username">（{{ oauth.status.user.username }}）</span>
+                  <span v-if="oauth.status?.scope"> · scope: {{ oauth.status.scope }}</span>
+                </div>
+              </v-alert>
+              <v-alert v-else type="warning" variant="tonal" density="compact" class="mb-3">
+                <div class="text-caption">尚未 OAuth 授权，HDHive 搜索与解锁不可用</div>
+              </v-alert>
+              <div class="d-flex flex-wrap ga-2 mb-3">
+                <v-btn color="primary" variant="tonal" size="small" :loading="oauth.loading || oauth.pending"
+                  :disabled="oauth.pending" prepend-icon="mdi-open-in-new" @click="startOAuth">
+                  HDHive OAuth 授权
+                </v-btn>
+                <v-btn v-if="oauth.status?.oauth_configured" color="warning" variant="outlined" size="small"
+                  :loading="oauth.loading" prepend-icon="mdi-link-off" @click="revokeOAuth">
+                  解除 OAuth
+                </v-btn>
+                <v-btn size="small" variant="text" prepend-icon="mdi-refresh" :loading="oauth.loading"
+                  @click="fetchStatus">
+                  刷新状态
+                </v-btn>
+              </div>
+              <div class="text-caption text-medium-emphasis mb-2">
+                当前状态：{{ authModeLabel() }}
+              </div>
             </v-card-text>
-          </v-card>
+          </v-card> -->
 
           <v-alert type="info" variant="tonal" density="compact" class="mt-6" icon="mdi-information">
             <div class="text-body-2 mb-1"><strong>频道搜索说明（/sh）</strong></div>
             <div class="text-caption">
-              <div class="mb-1">• 请至少配置 <strong>Telegram 频道</strong> 或 <strong>HDHive API Key</strong> 之一，否则无法使用
+              <div class="mb-1">• 请至少配置 <strong>Telegram 频道</strong> 或完成 <strong>HDHive OAuth 授权</strong>，否则无法使用
                 <code>/sh</code> 检索资源
               </div>
               <div>• HDHive 与 TG 结果会合并展示；HDHive 仅展示 115 网盘类资源，积分需求在列表中可见，确认转存时才解锁</div>
@@ -248,6 +276,28 @@
               <div class="mb-1">• 请填写 HDHive 账户与密码；每日签到与赌狗签到<strong>只能二选一</strong>开启</div>
               <div class="mb-1">• 启用后将在设定时间窗口内<strong>每天随机一刻</strong>执行一次登录并签到</div>
               <div>• 也可在 Telegram 等渠道发送 <code>/hdhivechin</code> 手动触发签到</div>
+            </div>
+          </v-alert>
+        </v-card-text>
+      </v-window-item>
+      <v-window-item value="tab-p115-checkin">
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="4">
+              <v-switch v-model="config.p115_checkin_enabled" label="115 每日签到" color="primary" density="compact" />
+            </v-col>
+            <v-col cols="12" md="4">
+              <v-text-field v-model="config.p115_checkin_time_range" label="签到随机时间段"
+                hint="格式 HH:MM-HH:MM，例如 06:30-09:45" persistent-hint density="compact" variant="outlined" />
+            </v-col>
+          </v-row>
+          <v-alert type="info" variant="tonal" density="compact" class="mt-3" icon="mdi-information">
+            <div class="text-body-2 mb-1"><strong>115 签到</strong></div>
+            <div class="text-caption">
+              <div class="mb-1">• 无需额外账号，使用已配置的 115 Cookie 自动签到</div>
+              <div class="mb-1">• 启用后将在设定时间窗口内<strong>每天随机一刻</strong>执行一次签到</div>
+              <div class="mb-1">• 签到功能不支持 web 类型 Cookie，请使用其他客户端类型扫码登录</div>
+              <div>• 也可在 Telegram 等渠道发送 <code>/p115_checkin</code> 手动触发签到</div>
             </div>
           </v-alert>
         </v-card-text>
@@ -372,11 +422,10 @@
                     <div v-for="(sp, spIndex) in item.source_paths" :key="`sp-${index}-${spIndex}`"
                       class="d-flex align-center mb-2">
                       <v-text-field v-model="item.source_paths[spIndex]" label="源目录路径" density="compact"
-                        variant="outlined" hide-details class="mr-2"
-                        append-icon="mdi-folder-home"
+                        variant="outlined" hide-details class="mr-2" append-icon="mdi-folder-home"
                         @click:append="openDirSelector(index, 'local', 'backupSourcePath', String(spIndex))"></v-text-field>
-                      <v-btn icon size="small" color="error" variant="tonal"
-                        @click="removeSourcePath(index, spIndex)" title="删除此目录">
+                      <v-btn icon size="small" color="error" variant="tonal" @click="removeSourcePath(index, spIndex)"
+                        title="删除此目录">
                         <v-icon>mdi-delete-outline</v-icon>
                       </v-btn>
                     </div>
@@ -409,8 +458,8 @@
                       hide-details></v-switch>
                   </v-col>
                   <v-col cols="12" md="4" v-if="item.timing_enabled">
-                    <VCronField v-model="item.cron" label="备份周期" density="compact" variant="outlined"
-                      hint="设置备份任务的执行周期" persistent-hint></VCronField>
+                    <VCronField v-model="item.cron" label="备份周期" density="compact" variant="outlined" hint="设置备份任务的执行周期"
+                      persistent-hint></VCronField>
                   </v-col>
                   <v-col cols="12" md="4">
                     <v-text-field v-model.number="item.retain_count" label="保留备份数" type="number" density="compact"
@@ -420,12 +469,12 @@
 
                 <v-row>
                   <v-col cols="12" class="d-flex ga-2">
-                    <v-btn size="small" color="primary" prepend-icon="mdi-backup-restore" @click="triggerBackup(item.name)"
-                      :loading="backupLoading[item.name]" :disabled="!item.name">
+                    <v-btn size="small" color="primary" prepend-icon="mdi-backup-restore"
+                      @click="triggerBackup(item.name)" :loading="backupLoading[item.name]" :disabled="!item.name">
                       立即备份
                     </v-btn>
-                    <v-btn size="small" color="info" prepend-icon="mdi-format-list-bulleted" @click="listBackups(item.name)"
-                      :disabled="!item.name">
+                    <v-btn size="small" color="info" prepend-icon="mdi-format-list-bulleted"
+                      @click="listBackups(item.name)" :disabled="!item.name">
                       查看备份
                     </v-btn>
                   </v-col>
@@ -462,8 +511,7 @@
               <v-divider></v-divider>
               <v-card-text>
                 <v-data-table :headers="backupListHeaders" :items="backupListData" density="compact"
-                  :loading="backupListLoading" no-data-text="暂无备份记录"
-                  items-per-page-text="每页条数">
+                  :loading="backupListLoading" no-data-text="暂无备份记录" items-per-page-text="每页条数">
                   <template v-slot:item.file_size="{ item }">
                     {{ formatBytes(item.file_size) }}
                   </template>
@@ -489,7 +537,8 @@
               </v-card-text>
               <v-card-actions>
                 <v-spacer></v-spacer>
-                <v-btn color="grey" variant="text" @click="restoreConfirmDialog = false" :disabled="restoreConfirmLoading">
+                <v-btn color="grey" variant="text" @click="restoreConfirmDialog = false"
+                  :disabled="restoreConfirmLoading">
                   取消
                 </v-btn>
                 <v-btn color="warning" variant="text" @click="handleConfirmRestore" :loading="restoreConfirmLoading">
@@ -506,6 +555,7 @@
 
 <script setup>
 import { ref, inject, watch, computed, reactive } from 'vue';
+import { useHdhiveOAuth } from '../composables/useHdhiveOAuth.js';
 
 const otherSubTab = ref('tab-sync-del');
 
@@ -523,6 +573,12 @@ const api = inject('api');
 const message = inject('message');
 const PLUGIN_ID = inject('PLUGIN_ID');
 const formatBytes = inject('formatBytes');
+
+const { oauth, startOAuth, revokeOAuth, fetchStatus, authModeLabel } = useHdhiveOAuth(
+  api,
+  message,
+  PLUGIN_ID,
+);
 const strmBackupItems = computed(() => config.strm_backup_items || []);
 
 const backupLoading = reactive({});

@@ -1,8 +1,8 @@
 orjson~=3.11.7
-p115client==0.0.8.4.8
+p115client==0.0.8.4.9
 p115rsacipher==0.0.1
 python-sqlitedict==0.0.3
-sentry-sdk~=2.59.0
+sentry-sdk~=2.61.0
 aligo~=6.2.8
 qrcode_terminal~=0.8
 pyahocorasick~=2.3.0

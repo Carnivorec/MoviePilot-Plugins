@@ -1,17 +1,16 @@
 from json import JSONDecodeError, loads
 from pathlib import Path
+from re import IGNORECASE, search as re_search
 from subprocess import TimeoutExpired, run
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
-
-from jinja2 import Template
 
 from app.core.cache import TTLCache
 from app.core.config import settings
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import TransferRenameEventData, FileItem
+from app.schemas import FileItem, TransferRenameBuildEventData
 from app.schemas.types import ChainEventType
 
 
@@ -21,9 +20,9 @@ class FFprobeNamingSupplement(_PluginBase):
     """
 
     plugin_name = "ffprobe命名补充"
-    plugin_desc = "整理重命名时调用 ffprobe，补全命名模板中的 videoFormat、videoCodec、audioCodec、fps、effect，支持 STRM "
+    plugin_desc = "整理重命名时调用 ffprobe，补全命名模板中的 videoFormat、videoCodec、videoBit、audioCodec、fps、effect，支持 STRM "
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/refs/heads/main/icons/ffmpeg.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.9"
     plugin_author = "DDSRem"
     author_url = "https://github.com/DDSRem"
     plugin_config_prefix = "ffprobenamingsupplement_"
@@ -209,7 +208,7 @@ class FFprobeNamingSupplement(_PluginBase):
                                             "label": "写入策略",
                                             "items": overwrite_items,
                                             "hint": (
-                                                "针对 videoFormat、videoCodec、audioCodec、fps、effect："
+                                                "针对 videoFormat、videoCodec、videoBit、audioCodec、fps、effect："
                                                 "仅补全＝缺或空才写入；始终覆盖＝以 ffprobe 为准覆盖"
                                             ),
                                             "persistent-hint": True,
@@ -280,6 +279,13 @@ class FFprobeNamingSupplement(_PluginBase):
                                                     "class": "text-body-2 mt-1",
                                                 },
                                                 "text": "{{videoCodec}} — 视频编码（如 H264、H265）",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {
+                                                    "class": "text-body-2 mt-1",
+                                                },
+                                                "text": "{{videoBit}} — 视频位深（如 8bit、10bit）",
                                             },
                                             {
                                                 "component": "div",
@@ -624,6 +630,33 @@ class FFprobeNamingSupplement(_PluginBase):
         return video_s, audio_s
 
     @classmethod
+    def _extract_video_bit_depth(cls, video_s: Dict[str, Any]) -> Optional[str]:
+        """
+        从 ffprobe 视频流提取位深，如 8bit、10bit
+
+        :param video_s: ffprobe 视频流字典
+        :return: 位深字符串或 None
+        """
+        bps = str(video_s.get("bits_per_raw_sample") or "").strip()
+        if bps and bps.isdigit():
+            return f"{bps}bit"
+        pix = str(video_s.get("pix_fmt") or "").strip().lower()
+        if pix:
+            m = re_search(r"(\d+)(le|be)", pix)
+            if m:
+                n = int(m.group(1))
+                if n > 0:
+                    return f"{n}bit"
+        prof = str(video_s.get("profile") or "").strip()
+        if prof:
+            m = re_search(r"(?:main|high)\s*(\d+)", prof, IGNORECASE)
+            if m:
+                return f"{m.group(1)}bit"
+        if pix:
+            return "8bit"
+        return None
+
+    @classmethod
     def _probe_to_rename_fields(cls, probe_json: Dict[str, Any]) -> Dict[str, str]:
         """
         从 ffprobe JSON 提取写入 rename_dict 的命名模板字段
@@ -650,6 +683,9 @@ class FFprobeNamingSupplement(_PluginBase):
             vc = cls._map_video_codec(video_s.get("codec_name"))
             if vc:
                 out["videoCodec"] = vc
+            vb = cls._extract_video_bit_depth(video_s)
+            if vb:
+                out["videoBit"] = vb
             fps = cls._parse_frame_rate(
                 video_s.get("avg_frame_rate")
             ) or cls._parse_frame_rate(video_s.get("r_frame_rate"))
@@ -724,8 +760,14 @@ class FFprobeNamingSupplement(_PluginBase):
         cur = rename_dict.get(key)
         if cur is None:
             return True
-        if isinstance(cur, str) and cur.strip() == "":
-            return True
+        if isinstance(cur, str):
+            cur_stripped = cur.strip()
+            if not cur_stripped:
+                return True
+            if key == "audioCodec" and not re_search(
+                r"(?:^|\s)\d+\.\d+$", cur_stripped
+            ):
+                return True
         return False
 
     @classmethod
@@ -773,15 +815,21 @@ class FFprobeNamingSupplement(_PluginBase):
             logger.warning("【ffprobe命名补充】ffprobe JSON 解析失败: %s", e)
             return None
 
-    @eventmanager.register(ChainEventType.TransferRename, priority=20)
-    def on_transfer_rename(self, event: Event) -> None:
+    @eventmanager.register(ChainEventType.TransferRenameBuild)
+    def on_transfer_rename_build(self, event: Event) -> None:
+        """
+        处理 TransferRenameBuild 链式事件，在主程序首次渲染前把 ffprobe
+        解析到的字段写入 rename_dict。
+
+        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突。
+        """
         if not self._enabled:
             return
         data = event.event_data
-        if not isinstance(data, TransferRenameEventData):
+        if not isinstance(data, TransferRenameBuildEventData):
             return
-        source_path: Optional[str] = getattr(data, "source_path", None)
-        source_item: Optional[FileItem] = getattr(data, "source_item", None)
+        source_path: Optional[str] = data.source_path
+        source_item: Optional[FileItem] = data.source_item
         if not source_path or not str(source_path).strip():
             logger.debug("【ffprobe命名补充】source_path 为空，跳过本次重命名补全")
             return
@@ -825,25 +873,6 @@ class FFprobeNamingSupplement(_PluginBase):
             )
             return
 
-        changed = False
         for key, val in fields.items():
             if cls._should_apply_key(self._overwrite_mode, key, rename_dict, val):
                 rename_dict[key] = val
-                changed = True
-
-        if not changed:
-            return
-
-        try:
-            new_render = Template(data.template_string).render(rename_dict)
-        except Exception as e:
-            logger.error(
-                "【ffprobe命名补充】模板重新渲染失败: %s",
-                e,
-                exc_info=True,
-            )
-            return
-
-        data.updated = True
-        data.updated_str = new_render
-        data.source = "ffprobe命名补充"

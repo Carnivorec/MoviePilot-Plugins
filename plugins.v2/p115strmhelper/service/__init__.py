@@ -8,12 +8,12 @@ from typing import List, Optional
 from aligo.core import set_config_folder
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from p115client import P115Client
 from pytz import timezone
 from watchfiles import watch, Change
 
 from ..core.aliyunpan import BAligo
 from ..core.config import configer
+from ..core.p115_client import create_client
 from ..core.i18n import i18n
 from ..core.message import post_message
 from ..core.p115 import get_pid_by_path
@@ -43,12 +43,10 @@ from ..schemas.monitor import ObserverInfo
 from ..service.fuse import FuseManager
 from ..service.life import monitor_life_thread_worker
 from ..service.hdhive_checkin.scheduler import hdhive_checkin_scheduler_tick
-from ..utils.sentry import sentry_manager
-from ..utils.sync_lock import (
-    STRM_SYNC_TASK_FULL,
-    STRM_SYNC_TASK_INCREMENT,
-    StrmSyncRunGuard,
+from ..service.p115_checkin.scheduler import (
+    p115_checkin_scheduler_tick as p115_scheduler_tick,
 )
+from ..utils.sentry import sentry_manager
 
 from app.log import logger
 from app.core.config import settings
@@ -61,8 +59,6 @@ class ServiceHelper:
     """
     服务项
     """
-
-    FULL_SYNC_PRIORITY_LEAD_SECONDS = 30
 
     def __init__(self):
         self.client = None
@@ -93,190 +89,11 @@ class ServiceHelper:
         self.webdav_core: Optional[WebdavCore] = None
 
         self.share_interactive_gen_strm_queue = ShareInteractiveGenStrmQueue()
-        self.strm_sync_guard = StrmSyncRunGuard()
 
-    @staticmethod
-    def _full_sync_config_available() -> bool:
-        """
-        检查全量同步核心配置是否可用
-        """
-        return bool(
-            configer.get_config("full_sync_strm_paths")
-            and configer.get_config("moviepilot_address")
-            and configer.get_config("user_download_mediaext")
-        )
-
-    @classmethod
-    def _timed_full_sync_config_available(cls) -> bool:
-        """
-        检查定期全量同步配置是否可用
-        """
-        return bool(
-            configer.get_config("timing_full_sync_strm")
-            and configer.get_config("cron_full_sync_strm")
-            and cls._full_sync_config_available()
-        )
-
-    @classmethod
-    def _is_full_sync_priority_window(cls, now: Optional[datetime] = None) -> bool:
-        """
-        判断当前是否处于全量优先窗口
-        """
-        if not cls._timed_full_sync_config_available():
-            return False
-
-        try:
-            sync_timezone = timezone(settings.TZ)
-            current_time = now or datetime.now(tz=sync_timezone)
-            if current_time.tzinfo is None:
-                current_time = sync_timezone.localize(current_time)
-            minute_start = current_time.replace(second=0, microsecond=0)
-            minute_end = minute_start + timedelta(minutes=1)
-            trigger = CronTrigger.from_crontab(
-                configer.get_config("cron_full_sync_strm"),
-                timezone=sync_timezone,
-            )
-            current_minute_fire_time = trigger.get_next_fire_time(
-                None, minute_start - timedelta(seconds=1)
-            )
-            if (
-                current_minute_fire_time
-                and minute_start <= current_minute_fire_time < minute_end
-            ):
-                return True
-
-            upcoming_fire_time = trigger.get_next_fire_time(None, current_time)
-            return bool(
-                upcoming_fire_time
-                and current_time < upcoming_fire_time
-                and upcoming_fire_time
-                <= current_time + timedelta(seconds=cls.FULL_SYNC_PRIORITY_LEAD_SECONDS)
-            )
-        except Exception as e:
-            logger.warning(f"【STRM同步互斥】判断全量优先窗口失败: {e}")
-            return False
-
-    def _should_skip_increment_for_full_priority(self) -> bool:
-        """
-        判断增量任务是否应该为全量优先策略让出执行机会
-        """
-        if self.strm_sync_guard.pending_full_sync:
-            if not self._full_sync_config_available():
-                self.strm_sync_guard.clear_full_sync_pending()
-                logger.warning("【STRM同步互斥】待执行全量配置已失效，清除待执行标记")
-                return False
-            logger.warning(
-                "【STRM同步互斥】增量STRM生成触发时存在待执行全量，跳过本次增量"
-            )
-            return True
-
-        if self._is_full_sync_priority_window():
-            logger.warning(
-                "【STRM同步互斥】增量STRM生成触发时处于全量优先窗口，跳过本次增量"
-            )
-            return True
-
-        return False
-
-    def _enter_strm_sync_task(self, task_name: str, task_kind: str) -> bool:
-        """
-        尝试进入 STRM 同步任务
-        """
-        if self.strm_sync_guard.acquire(task_name, task_kind=task_kind):
-            if task_kind == STRM_SYNC_TASK_FULL:
-                self.strm_sync_guard.clear_full_sync_pending()
-            logger.info(f"【STRM同步互斥】{task_name} 已取得同步执行权")
-            return True
-
-        running_task = self.strm_sync_guard.current_task or "其它STRM同步任务"
-        running_task_kind = self.strm_sync_guard.current_task_kind
-        if (
-            task_kind == STRM_SYNC_TASK_FULL
-            and running_task_kind == STRM_SYNC_TASK_INCREMENT
-        ):
-            first_pending = self.strm_sync_guard.mark_full_sync_pending()
-            if first_pending:
-                logger.warning(
-                    f"【STRM同步互斥】{task_name} 触发时 {running_task} 正在运行，"
-                    "已登记待执行全量"
-                )
-            else:
-                logger.warning(
-                    f"【STRM同步互斥】{task_name} 触发时 {running_task} 正在运行，"
-                    "待执行全量已存在，本次合并"
-                )
-            return False
-
-        logger.warning(
-            f"【STRM同步互斥】{task_name} 触发时 {running_task} 正在运行，跳过本次执行"
-        )
-        return False
-
-    def _start_pending_full_sync_if_needed(self) -> None:
-        """
-        如存在待执行全量请求则启动一次补跑线程
-        """
-        if not self.strm_sync_guard.pending_full_sync:
-            return
-        if not self._full_sync_config_available():
-            self.strm_sync_guard.clear_full_sync_pending()
-            logger.warning("【STRM同步互斥】待执行全量补跑前配置已失效，清除待执行标记")
-            return
-        if not self.strm_sync_guard.reserve_full_sync_runner():
-            return
-
-        pending_thread = Thread(
-            target=self._run_pending_full_sync,
-            name="P115StrmHelper-PendingFullSync",
-            daemon=True,
-        )
-        pending_thread.start()
-        logger.info("【STRM同步互斥】待执行全量补跑线程已启动")
-
-    def _run_pending_full_sync(self) -> None:
-        """
-        执行待补跑全量同步
-        """
-        logger.info("【STRM同步互斥】待执行全量补跑开始")
-        try:
-            if not self._full_sync_config_available():
-                self.strm_sync_guard.clear_full_sync_pending()
-                logger.warning("【STRM同步互斥】待执行全量补跑时配置已失效，清除待执行标记")
-                return
-            self.full_sync_strm_files(_from_pending=True)
-        finally:
-            self.strm_sync_guard.finish_full_sync_runner()
-            logger.info("【STRM同步互斥】待执行全量补跑线程已结束")
-
-    def _leave_strm_sync_task(self, task_name: str) -> None:
-        """
-        退出 STRM 同步任务
-        """
-        released_task_kind = self.strm_sync_guard.release()
-        logger.info(f"【STRM同步互斥】{task_name} 已释放同步执行权")
-        if released_task_kind == STRM_SYNC_TASK_INCREMENT:
-            self._start_pending_full_sync_if_needed()
-
-    def _create_mediainfo_downloader_for_task(
-        self, task_name: str
-    ) -> MediaInfoDownloader:
-        """
-        为当前任务创建独立媒体信息下载器
-        """
-        logger.info(f"【媒体信息文件下载】为 {task_name} 创建独立下载器")
-        return MediaInfoDownloader(cookie=configer.get_config("cookies"))
-
-    @staticmethod
-    def _close_mediainfo_downloader_for_task(
-        downloader: Optional[MediaInfoDownloader], task_name: str
-    ) -> None:
-        """
-        释放当前任务的媒体信息下载器
-        """
-        if not downloader:
-            return
-        downloader.close()
-        logger.info(f"【媒体信息文件下载】{task_name} 独立下载器已释放")
+        self._sync_state_lock = Lock()
+        self._full_sync_running = False
+        self._increment_sync_running = False
+        self._full_sync_pending = False
 
     def init_service(self):
         """
@@ -284,32 +101,40 @@ class ServiceHelper:
         """
         try:
             # 115 网盘客户端初始化
-            self.client = P115Client(configer.cookies)
+            self.client = create_client(
+                configer.cookies,
+                default_timeout=configer.get_default_timeout(),
+                slow_timeout=configer.get_slow_timeout(),
+            )
 
             # 阿里云盘登入
             aligo_config = configer.get_config("PLUGIN_ALIGO_PATH")
-            if configer.get_config("aliyundrive_token"):
-                set_config_folder(aligo_config)
-                if Path(aligo_config / "aligo.json").exists():
-                    logger.debug("Config login aliyunpan")
-                    self.aligo = BAligo(level=ERROR, re_login=False)
-                else:
-                    logger.debug("Refresh token login aliyunpan")
-                    self.aligo = BAligo(
-                        refresh_token=configer.get_config("aliyundrive_token"),
-                        level=ERROR,
-                        re_login=False,
-                    )
-                # 默认操作资源盘
-                v2_user = self.aligo.v2_user_get()
-                logger.debug(f"AliyunPan user info: {v2_user}")
-                resource_drive_id = v2_user.resource_drive_id
-                self.aligo.default_drive_id = resource_drive_id
-            elif (
-                not configer.get_config("aliyundrive_token")
-                and not Path(aligo_config / "aligo.json").exists()
-            ):
-                logger.debug("Login out aliyunpan")
+            try:
+                if configer.get_config("aliyundrive_token"):
+                    set_config_folder(aligo_config)
+                    if Path(aligo_config / "aligo.json").exists():
+                        logger.debug("Config login aliyunpan")
+                        self.aligo = BAligo(level=ERROR, re_login=False)
+                    else:
+                        logger.debug("Refresh token login aliyunpan")
+                        self.aligo = BAligo(
+                            refresh_token=configer.get_config("aliyundrive_token"),
+                            level=ERROR,
+                            re_login=False,
+                        )
+                    # 默认操作资源盘
+                    v2_user = self.aligo.v2_user_get()
+                    logger.debug(f"AliyunPan user info: {v2_user}")
+                    resource_drive_id = v2_user.resource_drive_id
+                    self.aligo.default_drive_id = resource_drive_id
+                elif (
+                    not configer.get_config("aliyundrive_token")
+                    and not Path(aligo_config / "aligo.json").exists()
+                ):
+                    logger.debug("Login out aliyunpan")
+                    self.aligo = None
+            except Exception as e:
+                logger.warning(f"阿里云盘登入失败，跳过初始化: {e}")
                 self.aligo = None
 
             # 媒体信息下载工具初始化
@@ -318,9 +143,6 @@ class ServiceHelper:
             )
             self.share_interactive_gen_strm_queue.bind_mediainfodownloader(
                 self.mediainfodownloader
-            )
-            self.share_interactive_gen_strm_queue.bind_mediainfo_downloader_factory(
-                self._create_mediainfo_downloader_for_task
             )
 
             # 生活事件监控初始化
@@ -595,66 +417,68 @@ class ServiceHelper:
             except Exception as e:
                 logger.error(f"【监控生活事件】注册守护服务失败: {str(e)}")
 
-    def full_sync_strm_files(self, _from_pending: bool = False):
+    def full_sync_strm_files(self):
         """
-        全量同步
+        全量同步（带并发互斥与优先级控制）
         """
-        task_name = "全量STRM生成"
+        with self._sync_state_lock:
+            if self._full_sync_running:
+                logger.info("【全量同步】全量同步已在运行，跳过本次触发")
+                return
+            if self._increment_sync_running:
+                logger.info("【全量同步】增量同步正在运行，已登记待执行全量同步")
+                self._full_sync_pending = True
+                return
+            self._full_sync_running = True
+        try:
+            self._run_full_sync()
+        finally:
+            with self._sync_state_lock:
+                self._full_sync_running = False
+
+    def _run_full_sync(self):
+        """
+        全量同步实际执行逻辑
+        """
         if (
             not configer.get_config("full_sync_strm_paths")
             or not configer.get_config("moviepilot_address")
             or not configer.get_config("user_download_mediaext")
         ):
-            if _from_pending:
-                self.strm_sync_guard.clear_full_sync_pending()
-                logger.warning("【STRM同步互斥】待执行全量配置已失效，跳过补跑")
             return
 
-        if not self._enter_strm_sync_task(task_name, STRM_SYNC_TASK_FULL):
-            return
-
-        mediainfo_downloader: Optional[MediaInfoDownloader] = None
-        try:
-            mediainfo_downloader = self._create_mediainfo_downloader_for_task(
-                task_name
-            )
-            strm_helper = FullSyncStrmHelper(
-                client=self.client,
-                mediainfodownloader=mediainfo_downloader,
-            )
-            strm_helper.strm_exec_history_kind = "full"
-            strm_helper.generate_strm_files(
-                full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
-            )
-            (
-                strm_count,
-                mediainfo_count,
-                strm_fail_count,
-                mediainfo_fail_count,
-                remove_unless_strm_count,
-                strm_cleanup_deferred_count,
-            ) = strm_helper.get_generate_total()
-            if configer.get_config("notify"):
-                text = f"""
+        strm_helper = FullSyncStrmHelper(
+            client=self.client,
+            mediainfodownloader=self.mediainfodownloader,
+        )
+        strm_helper.strm_exec_history_kind = "full"
+        strm_helper.generate_strm_files(
+            full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
+        )
+        (
+            strm_count,
+            mediainfo_count,
+            strm_fail_count,
+            mediainfo_fail_count,
+            remove_unless_strm_count,
+            strm_cleanup_deferred_count,
+        ) = strm_helper.get_generate_total()
+        if configer.get_config("notify"):
+            text = f"""
 📄 生成STRM文件 {strm_count} 个
 ⬇️ 下载媒体文件 {mediainfo_count} 个
 ❌ 生成STRM失败 {strm_fail_count} 个
 🚫 下载媒体失败 {mediainfo_fail_count} 个
 """
-                if remove_unless_strm_count != 0:
-                    text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
-                if strm_cleanup_deferred_count != 0:
-                    text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
-                post_message(
-                    mtype=NotificationType.Plugin,
-                    title=i18n.translate("full_sync_done_title"),
-                    text=text,
-                )
-        finally:
-            self._close_mediainfo_downloader_for_task(
-                mediainfo_downloader, task_name
+            if remove_unless_strm_count != 0:
+                text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
+            if strm_cleanup_deferred_count != 0:
+                text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
+            post_message(
+                mtype=NotificationType.Plugin,
+                title=i18n.translate("full_sync_done_title"),
+                text=text,
             )
-            self._leave_strm_sync_task(task_name)
 
     def start_full_sync(self):
         """
@@ -721,13 +545,8 @@ class ServiceHelper:
         if not configer.share_strm_config or not configer.moviepilot_address:
             return
 
-        task_name = "分享STRM生成"
-        mediainfo_downloader: Optional[MediaInfoDownloader] = None
         try:
-            mediainfo_downloader = self._create_mediainfo_downloader_for_task(
-                task_name
-            )
-            strm_helper = ShareStrmHelper(mediainfodownloader=mediainfo_downloader)
+            strm_helper = ShareStrmHelper(mediainfodownloader=self.mediainfodownloader)
             strm_helper.strm_exec_history_kind = "share"
             strm_helper.generate_strm_files()
             strm_count, mediainfo_count, strm_fail_count, mediainfo_fail_count = (
@@ -745,10 +564,6 @@ class ServiceHelper:
         except Exception as e:
             logger.error(f"【分享STRM生成】运行失败: {e}")
             return
-        finally:
-            self._close_mediainfo_downloader_for_task(
-                mediainfo_downloader, task_name
-            )
 
     def start_share_sync(self):
         """
@@ -767,9 +582,33 @@ class ServiceHelper:
 
     def increment_sync_strm_files(self, send_msg: bool = False):
         """
-        增量同步
+        增量同步（带并发互斥与优先级控制）
         """
-        task_name = "增量STRM生成"
+        with self._sync_state_lock:
+            if self._full_sync_running:
+                logger.info("【增量同步】全量同步正在运行，跳过本次增量同步")
+                return
+            if self._increment_sync_running:
+                logger.info("【增量同步】增量同步已在运行，跳过本次触发")
+                return
+            self._increment_sync_running = True
+        try:
+            self._run_increment_sync(send_msg)
+        finally:
+            run_full = False
+            with self._sync_state_lock:
+                self._increment_sync_running = False
+                if self._full_sync_pending:
+                    self._full_sync_pending = False
+                    run_full = True
+            if run_full:
+                logger.info("【增量同步】增量同步完成，执行待运行的全量同步")
+                self.full_sync_strm_files()
+
+    def _run_increment_sync(self, send_msg: bool = False):
+        """
+        增量同步实际执行逻辑
+        """
         if (
             not configer.get_config("increment_sync_strm_paths")
             or not configer.get_config("moviepilot_address")
@@ -777,65 +616,55 @@ class ServiceHelper:
         ):
             return
 
-        if self._should_skip_increment_for_full_priority():
-            return
-
-        if not self._enter_strm_sync_task(task_name, STRM_SYNC_TASK_INCREMENT):
-            return
-
-        mediainfo_downloader: Optional[MediaInfoDownloader] = None
-        try:
-            mediainfo_downloader = self._create_mediainfo_downloader_for_task(
-                task_name
+        strm_helper = IncrementSyncStrmHelper(
+            client=self.client, mediainfodownloader=self.mediainfodownloader
+        )
+        strm_helper.strm_exec_history_kind = "increment"
+        strm_helper.generate_strm_files(
+            sync_strm_paths=configer.get_config("increment_sync_strm_paths"),
+        )
+        (
+            strm_count,
+            mediainfo_count,
+            strm_fail_count,
+            mediainfo_fail_count,
+            remove_unless_strm_count,
+        ) = strm_helper.get_generate_total()
+        if configer.get_config("notify") and (
+            send_msg
+            or (
+                strm_count != 0
+                or mediainfo_count != 0
+                or strm_fail_count != 0
+                or mediainfo_fail_count != 0
+                or remove_unless_strm_count != 0
             )
-            strm_helper = IncrementSyncStrmHelper(
-                client=self.client, mediainfodownloader=mediainfo_downloader
-            )
-            strm_helper.strm_exec_history_kind = "increment"
-            strm_helper.generate_strm_files(
-                sync_strm_paths=configer.get_config("increment_sync_strm_paths"),
-            )
-            (
-                strm_count,
-                mediainfo_count,
-                strm_fail_count,
-                mediainfo_fail_count,
-                remove_unless_strm_count,
-            ) = strm_helper.get_generate_total()
-            if configer.get_config("notify") and (
-                send_msg
-                or (
-                    strm_count != 0
-                    or mediainfo_count != 0
-                    or strm_fail_count != 0
-                    or mediainfo_fail_count != 0
-                    or remove_unless_strm_count != 0
-                )
-            ):
-                text = f"""
+        ):
+            text = f"""
 📄 生成STRM文件 {strm_count} 个
 ⬇️ 下载媒体文件 {mediainfo_count} 个
 ❌ 生成STRM失败 {strm_fail_count} 个
 🚫 下载媒体失败 {mediainfo_fail_count} 个
 """
-                if remove_unless_strm_count != 0:
-                    text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
-                post_message(
-                    mtype=NotificationType.Plugin,
-                    title=i18n.translate("inc_sync_done_title"),
-                    text=text,
-                )
-        finally:
-            self._close_mediainfo_downloader_for_task(
-                mediainfo_downloader, task_name
+            if remove_unless_strm_count != 0:
+                text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
+            post_message(
+                mtype=NotificationType.Plugin,
+                title=i18n.translate("inc_sync_done_title"),
+                text=text,
             )
-            self._leave_strm_sync_task(task_name)
 
     def hdhive_checkin_scheduler_tick(self) -> None:
         """
         HDHive 签到调度
         """
         hdhive_checkin_scheduler_tick()
+
+    def p115_checkin_scheduler_tick(self) -> None:
+        """
+        115 签到调度
+        """
+        p115_scheduler_tick(client=self.client)
 
     def start_directory_upload(self):
         """

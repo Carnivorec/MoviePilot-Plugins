@@ -471,7 +471,7 @@ class BackupStrmHelper:
             )
             headers = {"User-Agent": configer.get_user_agent()}
             with HttpxClient(headers=headers, follow_redirects=True) as hc:
-                with hc.stream("GET", str(download_url)) as resp:
+                with hc.stream("GET", str(download_url), timeout=60.0) as resp:
                     resp.raise_for_status()
                     with open(temp_file, "wb") as f:
                         for chunk in resp.iter_bytes(chunk_size=8 * 1024 * 1024):

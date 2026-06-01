@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
+from re import search as re_search
 from typing import Any, List, Dict, Tuple, Optional, Union
 
 from app.core.config import settings
@@ -12,17 +13,28 @@ from app.plugins import _PluginBase
 from app.schemas import (
     FileItem,
     NotificationType,
-    TransferRenameEventData,
-    TransferOverwriteCheckEventData,
-    TransferInterceptEventData,
 )
 from app.core.meta import MetaVideo
 from app.schemas.types import EventType, MessageChannel, ChainEventType, MediaType
 from app.helper.directory import DirectoryHelper
 from app.chain.storage import StorageChain
 
+try:
+    from app.schemas import TransferRenameBuildEventData
+except ImportError:
+    TransferRenameBuildEventData = None
+
+try:
+    from app.schemas import TransferOverwriteCheckEventData
+except ImportError:
+    TransferOverwriteCheckEventData = None
+
+try:
+    from app.schemas import TransferInterceptEventData
+except ImportError:
+    TransferInterceptEventData = None
+
 from apscheduler.triggers.cron import CronTrigger
-from jinja2 import Template
 from fastapi import Request
 from p115center import P115Center
 
@@ -31,6 +43,7 @@ from .version import VERSION
 from .api import Api
 from .service import servicer
 from .service.hdhive_checkin.job import run_hdhive_checkin_once
+from .service.p115_checkin.job import run_p115_checkin_once
 from .core.cache import pantransfercacher, sharestrmcacher
 from .core.config import configer
 from .core.i18n import i18n
@@ -40,6 +53,7 @@ from .db_manager.init import init_db, migration_db, init_migration_scripts
 from .mcp import MCPManager
 from .patch.u115_open import U115Patcher
 from .patch.p115disk_upload import P115DiskPatcher
+from .core.message import UploadNotifyAggregator
 from .interactive.framework.callbacks import decode_action, Action
 from .interactive.framework.manager import BaseSessionManager
 from .interactive.framework.schemas import TSession
@@ -51,6 +65,7 @@ from .helper.strm import (
     ShareInteractiveGenStrmQueue,
     TransferStrmHelper,
 )
+from .helper.hdhive.open import is_authorized
 from .helper.strm.full import strm_cleanup_interaction
 from .helper.mediasyncdel import MediaSyncDelHelper
 from .helper.mediasyncdel.webhook_queue import (
@@ -63,6 +78,23 @@ from .utils.sentry import sentry_manager
 from .helper.share.share_links import ShareLinkResolver
 from .utils.rename_dict import RenameDictUtils
 from .utils.url import UrlUtils
+
+
+def optional_chain_event_register(event_type_name: str):
+    """
+    旧版 MoviePilot 链式事件兼容注册装饰器。
+    """
+
+    event_type = getattr(ChainEventType, event_type_name, None)
+    if event_type is not None:
+        return eventmanager.register(event_type)
+
+    logger.info(f"【事件兼容】当前 MoviePilot 缺少 {event_type_name}，跳过对应事件注册")
+
+    def decorator(func):
+        return func
+
+    return decorator
 
 
 # 实例化一个该插件专用的 SessionManager
@@ -271,6 +303,13 @@ class P115StrmHelper(_PluginBase):
                 "desc": "手动 HDHive 签到",
                 "category": "",
                 "data": {"action": "hdhive_checkin_manual"},
+            },
+            {
+                "cmd": "/p115_checkin",
+                "event": EventType.PluginAction,
+                "desc": "手动 115 签到",
+                "category": "",
+                "data": {"action": "p115_checkin_manual"},
             },
         ]
 
@@ -572,6 +611,34 @@ class P115StrmHelper(_PluginBase):
                 "summary": "判断是否有权限使用此增强功能",
             },
             {
+                "path": "/hdhive/oauth/start",
+                "endpoint": self.api.hdhive_oauth_start_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "HDHive OAuth 授权开始",
+            },
+            {
+                "path": "/hdhive/oauth/complete",
+                "endpoint": self.api.hdhive_oauth_complete_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "HDHive OAuth 授权完成",
+            },
+            {
+                "path": "/hdhive/oauth/status",
+                "endpoint": self.api.hdhive_oauth_status_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "HDHive OAuth 状态",
+            },
+            {
+                "path": "/hdhive/oauth/revoke",
+                "endpoint": self.api.hdhive_oauth_revoke_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "HDHive OAuth 解除授权",
+            },
+            {
                 "path": "/get_authorization_status",
                 "endpoint": self.api.get_authorization_status_api,
                 "methods": ["GET"],
@@ -856,6 +923,16 @@ class P115StrmHelper(_PluginBase):
                     "kwargs": {},
                 }
             )
+        if configer.enabled and configer.p115_checkin_enabled:
+            cron_service.append(
+                {
+                    "id": "P115StrmHelper_p115_checkin",
+                    "name": "115 签到调度",
+                    "trigger": CronTrigger.from_crontab("*/5 * * * *"),
+                    "func": servicer.p115_checkin_scheduler_tick,
+                    "kwargs": {},
+                }
+            )
         if configer.strm_backup_enabled and configer.strm_backup_items:
             for backup_item in configer.strm_backup_items:
                 if (
@@ -869,7 +946,7 @@ class P115StrmHelper(_PluginBase):
                             "name": f"STRM 定时备份-{backup_item.name}",
                             "trigger": CronTrigger.from_crontab(backup_item.cron),
                             "func": servicer.run_backup_task,
-                            "kwargs": {"task_name": backup_item.name},
+                            "func_kwargs": {"task_name": backup_item.name},
                         }
                     )
         if cron_service:
@@ -1159,7 +1236,7 @@ class P115StrmHelper(_PluginBase):
         userid = self._get_event_userid(event_data)
 
         has_tg = bool(configer.tg_search_channels)
-        has_hdhive = bool((configer.get_config("hdhive_api_key") or "").strip())
+        has_hdhive = is_authorized()
         if not has_tg and not has_hdhive:
             post_message(
                 channel=event.event_data.get("channel"),
@@ -1222,6 +1299,29 @@ class P115StrmHelper(_PluginBase):
             channel=event.event_data.get("channel"),
             source=event.event_data.get("source"),
             title="HDHive 手动签到" + ("成功" if ok else "失败"),
+            text="\n" + text + "\n",
+            userid=userid,
+        )
+
+    @eventmanager.register(EventType.PluginAction)
+    def p115_checkin_manual(self, event: Event):
+        """
+        远程命令 /p115_checkin 手动 115 签到
+        """
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "p115_checkin_manual":
+            return
+        userid = self._get_event_userid(event_data)
+
+        ok, text = run_p115_checkin_once(
+            client=servicer.client, manual=True, send_notify=False
+        )
+        post_message(
+            channel=event.event_data.get("channel"),
+            source=event.event_data.get("source"),
+            title="115 手动签到" + ("成功" if ok else "失败"),
             text="\n" + text + "\n",
             userid=userid,
         )
@@ -1614,8 +1714,8 @@ class P115StrmHelper(_PluginBase):
             )
             return
 
-        share_u115 = ShareLinkResolver.extract_u115_share_url_from_text(args)
-        if not share_u115:
+        share_urls = ShareLinkResolver.extract_all_u115_share_urls_from_text(args)
+        if not share_urls:
             if ShareLinkResolver.extract_share_url_from_text(args):
                 post_message(
                     channel=channel,
@@ -1642,10 +1742,24 @@ class P115StrmHelper(_PluginBase):
             )
             return
 
-        servicer.share_interactive_gen_strm_queue.enqueue_and_notify_user(
-            share_url=share_u115,
+        pending = 0
+        for share_url in share_urls:
+            pending = servicer.share_interactive_gen_strm_queue.enqueue(
+                share_url=share_url,
+                channel=channel,
+                source=source,
+                userid=userid,
+            )
+
+        post_message(
             channel=channel,
             source=source,
+            title=i18n.translate("p115_share_strm_done_title"),
+            text=i18n.translate(
+                "p115_share_strm_multi_queued",
+                count=len(share_urls),
+                pending=pending,
+            ),
             userid=userid,
         )
 
@@ -1720,10 +1834,16 @@ class P115StrmHelper(_PluginBase):
         mediasyncdel_helper = MediaSyncDelHelper()
         mediasyncdel_helper.download_file_del_sync(event)
 
-    @eventmanager.register(ChainEventType.TransferRename)
+    @optional_chain_event_register("TransferRenameBuild")
     def rename_dict_supplement(self, event: Event) -> None:
         """
         媒体数据补充
+
+        响应主程序渲染前的 TransferRenameBuild 事件，通过 ffprobe / 中心化接口
+        获取真实媒体信息（如 effect=SDR/HDR、视频/音频编码等），写回
+        ``event_data.rename_dict``。
+
+        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突。
         """
         if not configer.enabled:
             return
@@ -1731,10 +1851,12 @@ class P115StrmHelper(_PluginBase):
             return
 
         data = event.event_data
-        if not isinstance(data, TransferRenameEventData):
+        if TransferRenameBuildEventData is None or not isinstance(
+            data, TransferRenameBuildEventData
+        ):
             return
-        source_path: Optional[str] = getattr(data, "source_path", None)
-        source_item: Optional[FileItem] = getattr(data, "source_item", None)
+        source_path: Optional[str] = data.source_path
+        source_item: Optional[FileItem] = data.source_item
         if not source_path or not str(source_path).strip():
             logger.debug("【媒体数据补充】source_path 为空，跳过本次重命名补全")
             return
@@ -1778,7 +1900,6 @@ class P115StrmHelper(_PluginBase):
                 logger.warning(f"【媒体数据补充】{url} 中心化获取媒体信息失败: {e}")
                 return None
 
-        changed = False
         media_info: Dict[str, Any] = {}
 
         params: Dict[str, Any] = {"strm_resolve_media_info": share_strm_center}
@@ -1833,28 +1954,15 @@ class P115StrmHelper(_PluginBase):
                 continue
             if overwrite_mode == "fill_missing":
                 cur = data.rename_dict.get(key)
-                if cur is not None and not (isinstance(cur, str) and cur.strip() == ""):
+                if isinstance(cur, str):
+                    cur_stripped = cur.strip()
+                    if cur_stripped and (key != "audioCodec" or re_search(r"(?:^|\s)\d+\.\d+$", cur_stripped)):
+                        continue
+                elif cur is not None:
                     continue
             data.rename_dict[key] = value
-            changed = True
-        if not changed:
-            return
 
-        try:
-            new_render = Template(data.template_string).render(data.rename_dict)
-        except Exception as e:
-            logger.error(
-                "【媒体数据补充】模板重新渲染失败: %s",
-                e,
-                exc_info=True,
-            )
-            return
-
-        data.updated = True
-        data.updated_str = new_render
-        data.source = "媒体数据补充"
-
-    @eventmanager.register(ChainEventType.TransferIntercept)
+    @optional_chain_event_register("TransferIntercept")
     def intercept_if_exists_in_library(self, event: Event) -> None:
         """
         媒体库已存在时拦截整理
@@ -1863,7 +1971,9 @@ class P115StrmHelper(_PluginBase):
             return
 
         data = event.event_data
-        if not isinstance(data, TransferInterceptEventData):
+        if TransferInterceptEventData is None or not isinstance(
+            data, TransferInterceptEventData
+        ):
             return
 
         if data.cancel:
@@ -1930,7 +2040,7 @@ class P115StrmHelper(_PluginBase):
                 exc_info=True,
             )
 
-    @eventmanager.register(ChainEventType.TransferOverwriteCheck)
+    @optional_chain_event_register("TransferOverwriteCheck")
     def share_strm_overwrite_check(self, event: Event) -> None:
         """
         分享STRM覆盖大小检查
@@ -1939,7 +2049,9 @@ class P115StrmHelper(_PluginBase):
             return
 
         data = event.event_data
-        if not isinstance(data, TransferOverwriteCheckEventData):
+        if TransferOverwriteCheckEventData is None or not isinstance(
+            data, TransferOverwriteCheckEventData
+        ):
             return
 
         if data.target_path.suffix.lower() != ".strm":
@@ -2050,6 +2162,7 @@ class P115StrmHelper(_PluginBase):
         ct_db_manager.close_database()
         U115Patcher().disable()
         P115DiskPatcher().disable()
+        UploadNotifyAggregator.shutdown()
 
     async def _save_config_api(self, request: Request) -> Dict:
         """

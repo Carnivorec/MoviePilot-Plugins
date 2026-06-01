@@ -19,6 +19,7 @@ from app.schemas import FileItem
 
 from ....core.cache import sharestrmcacher
 from ....core.config import configer
+from ....core.p115_client import create_client_with_timeout
 from ....core.history import StrmExecHistoryManager
 from ....core.i18n import i18n
 from ....core.message import post_message
@@ -50,7 +51,13 @@ class ShareStrmHelper:
             for ext in configer.user_download_mediaext.replace("，", ",").split(",")
         }
 
-        self.share_client = ShareP115Client(configer.cookies)
+        raw_client = ShareP115Client(configer.cookies)
+        if configer.timeout_enabled:
+            default_timeout = configer.get_default_timeout()
+            slow_timeout = configer.get_slow_timeout()
+            self.share_client = create_client_with_timeout(raw_client, default_timeout, slow_timeout)
+        else:
+            self.share_client = raw_client
         self.mediainfodownloader = mediainfodownloader
 
         self.elapsed_time = 0
@@ -110,6 +117,7 @@ class ShareStrmHelper:
             enabled=config.media_server_refresh,
             mp_mediaserver=configer.share_strm_mp_mediaserver_paths,
             mediaservers=configer.share_strm_mediaservers,
+            delay_seconds=configer.share_strm_media_server_refresh_delay,
         )
 
         def _refresh_media_server(file_path: Path) -> None:

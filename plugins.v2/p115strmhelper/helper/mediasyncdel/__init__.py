@@ -418,6 +418,11 @@ class MediaSyncDelHelper:
         :param file_path: 文件路径
         :param p115_library_path: 115 网盘 媒体库路径映射
         """
+        stem_suffix = Path(Path(file_path).stem).suffix
+        mediaext = {ext.lstrip(".").lower() for ext in settings.RMT_MEDIAEXT or []}
+        if stem_suffix and stem_suffix.lstrip(".").lower() in mediaext:
+            return stem_suffix.lstrip(".")
+
         _, sub_paths = PathUtils.get_p115_media_path(file_path, p115_library_path)
         if not sub_paths:
             return None
@@ -590,6 +595,9 @@ class MediaSyncDelHelper:
             fileitem = self.storagechain.get_file_item(
                 storage=storage, path=Path(file_path)
             )
+            if not fileitem:
+                logger.warn(f"【同步删除】{media_name} 网盘媒体不存在：{file_path}")
+                return
             if fileitem.type == "dir":
                 # 删除整个文件夹
                 self.storagechain.delete_file(fileitem)
@@ -805,22 +813,10 @@ class MediaSyncDelHelper:
                     "\\", "/"
                 )
 
-        if Path(media_path).suffix:
-            media_path = str(
-                Path(media_path).parent
-                / str(Path(media_path).stem + "." + media_suffix)
-            )
-            # 大小写适配，有些 SB 资源是大写的
-            if media_suffix.isupper():
-                media_suffix = media_suffix.lower()
-            elif media_suffix.islower():
-                media_suffix = media_suffix.upper()
-            media_path_final = str(
-                Path(media_path).parent
-                / str(Path(media_path).stem + "." + media_suffix)
-            )
-        else:
-            media_path_final = media_path
+        media_path, media_path_final = PathUtils.get_media_file_paths_with_suffix(
+            file_path=media_path,
+            media_suffix=media_suffix,
+        )
 
         if mp_media_path and mp_media_path.exists():
             logger.warn(

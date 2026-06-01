@@ -11,6 +11,7 @@ from oss2.utils import b64encode_as_string
 from oss2.exceptions import ServerError
 from p115client import P115Client, check_response
 from p115client.const import _CACHE_DIR
+from p115client.exception import P115NotADirectoryError
 from p115client.tool.attr import normalize_attr, get_id_to_path, get_attr
 from p115client.tool.fs_files import iter_fs_files
 from p115client.tool.iterdir import iter_files_with_path_skim
@@ -22,7 +23,7 @@ from app.modules.filemanager.storages import transfer_process
 from app.schemas import FileItem, StorageUsage
 
 from .cache import IdPathCache, ItemIdCache
-from .tools import RateLimiter, get_ios_ua_app, get_p115_request_kwargs
+from .tools import RateLimiter, get_ios_ua_app
 
 
 class P115Api:
@@ -240,11 +241,20 @@ class P115Api:
                     )
         except Exception as e:
             logger.warn(f"【P115Disk】获取信息失败: {str(e)}")
+            if isinstance(e, P115NotADirectoryError) and file_id and file_id != "0":
+                try:
+                    self._id_cache.remove(id=int(file_id))
+                    self._id_item_cache.remove(id=int(file_id))
+                except Exception:
+                    pass
             try:
                 storage_chain = StorageChain()
+                fallback_dict = fileitem.model_dump(exclude={"storage"})
+                if isinstance(e, P115NotADirectoryError):
+                    fallback_dict["fileid"] = None
                 fileitem = FileItem(
                     storage="u115",
-                    **fileitem.model_dump(exclude={"storage"}),
+                    **fallback_dict,
                 )
                 fallback_items = storage_chain.list_files(
                     fileitem=fileitem, recursion=False
@@ -646,9 +656,7 @@ class P115Api:
             return None
 
         download_url = self.client.download_url(
-            detail.pickcode,
-            user_agent=settings.USER_AGENT,
-            **get_p115_request_kwargs(),
+            detail.pickcode, user_agent=settings.USER_AGENT
         ).geturl()
         if not download_url:
             logger.error(f"【P115Disk】下载链接为空: {fileitem.name}")
@@ -665,7 +673,10 @@ class P115Api:
 
         try:
             with stream(
-                "GET", download_url, headers={"user-agent": settings.USER_AGENT}
+                "GET",
+                download_url,
+                headers={"user-agent": settings.USER_AGENT},
+                timeout=60.0,
             ) as r:
                 r.raise_for_status()
                 downloaded_size = 0
@@ -818,7 +829,6 @@ class P115Api:
                         filesha1=file_sha1,
                         pid=target_pid,
                         read_range_bytes_or_hash=read_range_hash,
-                        **get_p115_request_kwargs(),
                     )
                     check_response(init_resp)
                     break

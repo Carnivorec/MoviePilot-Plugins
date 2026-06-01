@@ -64,80 +64,49 @@ class StrmSyncRunGuardTest(unittest.TestCase):
 
 
 class ServiceEntryGuardSourceTest(unittest.TestCase):
-    def test_sync_entries_check_guard_before_core_helper_creation(self):
+    def test_sync_entries_use_official_state_machine(self):
         service_path = (
             Path(__file__).resolve().parents[1] / "service" / "__init__.py"
         )
         source = service_path.read_text(encoding="utf-8")
 
+        self.assertIn("self._sync_state_lock = Lock()", source)
+        self.assertIn("self._full_sync_running = False", source)
+        self.assertIn("self._increment_sync_running = False", source)
+        self.assertIn("self._full_sync_pending = False", source)
+        self.assertNotIn("StrmSyncRunGuard", source)
+
+    def test_full_sync_registers_pending_when_increment_is_running(self):
+        service_path = (
+            Path(__file__).resolve().parents[1] / "service" / "__init__.py"
+        )
+        source = service_path.read_text(encoding="utf-8")
         full_func = source[source.index("    def full_sync_strm_files") :]
         full_func = full_func[: full_func.index("    def start_full_sync")]
-        self.assertLess(
-            full_func.index(
-                "if not self._enter_strm_sync_task(task_name, STRM_SYNC_TASK_FULL):"
-            ),
-            full_func.index("FullSyncStrmHelper("),
-        )
+        self.assertIn("with self._sync_state_lock:", full_func)
+        self.assertIn("if self._full_sync_running:", full_func)
+        self.assertIn("if self._increment_sync_running:", full_func)
+        self.assertIn("self._full_sync_pending = True", full_func)
+        self.assertLess(full_func.index("self._full_sync_running = True"), full_func.index("self._run_full_sync()"))
         self.assertIn("finally:", full_func)
-        self.assertIn("self._leave_strm_sync_task(task_name)", full_func)
+        self.assertIn("self._full_sync_running = False", full_func)
 
+    def test_increment_replays_pending_full_after_release(self):
+        service_path = (
+            Path(__file__).resolve().parents[1] / "service" / "__init__.py"
+        )
+        source = service_path.read_text(encoding="utf-8")
         increment_func = source[source.index("    def increment_sync_strm_files") :]
         increment_func = increment_func[: increment_func.index("    def hdhive_checkin_scheduler_tick")]
-        self.assertLess(
-            increment_func.index(
-                "if not self._enter_strm_sync_task(task_name, STRM_SYNC_TASK_INCREMENT):"
-            ),
-            increment_func.index("IncrementSyncStrmHelper("),
-        )
+        self.assertIn("with self._sync_state_lock:", increment_func)
+        self.assertIn("if self._full_sync_running:", increment_func)
+        self.assertIn("if self._increment_sync_running:", increment_func)
+        self.assertLess(increment_func.index("self._increment_sync_running = True"), increment_func.index("self._run_increment_sync(send_msg)"))
         self.assertIn("finally:", increment_func)
-        self.assertIn("self._leave_strm_sync_task(task_name)", increment_func)
-
-    def test_increment_checks_full_priority_before_acquiring_guard(self):
-        service_path = (
-            Path(__file__).resolve().parents[1] / "service" / "__init__.py"
-        )
-        source = service_path.read_text(encoding="utf-8")
-        increment_func = source[source.index("    def increment_sync_strm_files") :]
-        increment_func = increment_func[: increment_func.index("    def hdhive_checkin_scheduler_tick")]
-
-        self.assertLess(
-            increment_func.index("if self._should_skip_increment_for_full_priority():"),
-            increment_func.index(
-                "if not self._enter_strm_sync_task(task_name, STRM_SYNC_TASK_INCREMENT):"
-            ),
-        )
-
-    def test_full_entry_registers_pending_when_increment_holds_guard(self):
-        service_path = (
-            Path(__file__).resolve().parents[1] / "service" / "__init__.py"
-        )
-        source = service_path.read_text(encoding="utf-8")
-        enter_func = source[source.index("    def _enter_strm_sync_task") :]
-        enter_func = enter_func[: enter_func.index("    def _start_pending_full_sync_if_needed")]
-
-        self.assertIn("task_kind == STRM_SYNC_TASK_FULL", enter_func)
-        self.assertIn("running_task_kind == STRM_SYNC_TASK_INCREMENT", enter_func)
-        self.assertIn("self.strm_sync_guard.mark_full_sync_pending()", enter_func)
-
-    def test_pending_full_sync_blocks_new_increment_and_replays_after_release(self):
-        service_path = (
-            Path(__file__).resolve().parents[1] / "service" / "__init__.py"
-        )
-        source = service_path.read_text(encoding="utf-8")
-        skip_func = source[
-            source.index("    def _should_skip_increment_for_full_priority") :
-        ]
-        skip_func = skip_func[: skip_func.index("    def _enter_strm_sync_task")]
-        leave_func = source[source.index("    def _leave_strm_sync_task") :]
-        leave_func = leave_func[: leave_func.index("    def _create_mediainfo_downloader_for_task")]
-        replay_func = source[source.index("    def _run_pending_full_sync") :]
-        replay_func = replay_func[: replay_func.index("    def _leave_strm_sync_task")]
-
-        self.assertIn("self.strm_sync_guard.pending_full_sync", skip_func)
-        self.assertIn("跳过本次增量", skip_func)
-        self.assertIn("released_task_kind == STRM_SYNC_TASK_INCREMENT", leave_func)
-        self.assertIn("self._start_pending_full_sync_if_needed()", leave_func)
-        self.assertIn("self.full_sync_strm_files(_from_pending=True)", replay_func)
+        self.assertIn("self._increment_sync_running = False", increment_func)
+        self.assertIn("if self._full_sync_pending:", increment_func)
+        self.assertIn("self._full_sync_pending = False", increment_func)
+        self.assertIn("self.full_sync_strm_files()", increment_func)
 
 
 class MediaInfoDownloaderStateTest(unittest.TestCase):
@@ -297,47 +266,45 @@ class MediaInfoDownloaderStateTest(unittest.TestCase):
         downloader.mediainfo_fail_count = 0
         downloader.mediainfo_fail_dict = []
         downloader._pending_delete_scids = []
-        downloader._pending_delete_task_types = []
+        downloader._batch_lock = None
         downloader.deleted_batches = []
 
-        def fake_delete(scids, task_type="媒体信息文件下载"):
-            downloader.deleted_batches.append((list(scids), task_type))
+        def fake_delete(scids):
+            downloader.deleted_batches.append(list(scids))
 
         downloader._batch_fs_delete = fake_delete
-        downloader._closed = True
         return downloader
 
-    def test_two_downloader_tasks_do_not_reset_each_other_state(self):
-        first = self._new_downloader_stub()
-        second = self._new_downloader_stub()
+    def test_official_batch_lock_protects_batch_state_reset(self):
+        mediainfo_path = (
+            Path(__file__).resolve().parents[1]
+            / "helper"
+            / "mediainfo_download"
+            / "__init__.py"
+        )
+        source = mediainfo_path.read_text(encoding="utf-8")
 
-        first.mediainfo_count = 3
-        first.mediainfo_fail_count = 1
-        first.mediainfo_fail_dict = ["/a/movie.ass"]
-        first._queue_pending_delete(101, "字幕")
-
-        second._reset_download_run_state("普通媒体信息", [{"path": "/b/movie.srt"}])
-
-        self.assertEqual(first.mediainfo_count, 3)
-        self.assertEqual(first.mediainfo_fail_count, 1)
-        self.assertEqual(first.mediainfo_fail_dict, ["/a/movie.ass"])
-        self.assertEqual(first._pending_delete_scids, [101])
-        self.assertEqual(first._pending_delete_task_types, ["字幕"])
-        self.assertEqual(second.mediainfo_count, 0)
-        self.assertEqual(second._pending_delete_scids, [])
+        self.assertIn("self._batch_lock = Lock()", source)
+        self.assertIn("with self._batch_lock:", source)
+        batch_func = source[source.index("    def batch_auto_downloader") :]
+        batch_func = batch_func[: batch_func.index("    def batch_auto_share_downloader")]
+        self.assertLess(
+            batch_func.index("self._pending_delete_scids = []"),
+            batch_func.index("if subtitle_list and not self.stop_all_flag:"),
+        )
 
     def test_multiple_subtitle_batches_flush_complete_delete_list(self):
         downloader = self._new_downloader_stub()
 
         for scid in [11, 22, 33]:
-            downloader._queue_pending_delete(scid, "字幕")
+            downloader._pending_delete_scids.append(scid)
             downloader._flush_pending_deletes()
 
         self.assertEqual(downloader.deleted_batches, [])
 
         downloader._flush_pending_deletes(force=True)
 
-        self.assertEqual(downloader.deleted_batches, [([11, 22, 33], "字幕")])
+        self.assertEqual(downloader.deleted_batches, [[11, 22, 33]])
         self.assertEqual(downloader._pending_delete_scids, [])
 
 

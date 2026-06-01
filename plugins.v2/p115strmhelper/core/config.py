@@ -33,7 +33,6 @@ from ..schemas.share import (
 from ..schemas.strm_api import StrmApiConfig
 from ..utils.cron import CronUtils
 from ..utils.machineid import MachineID
-from ..utils.p115_timeout import build_p115_timeout_extensions
 from ..utils.user_agent import UserAgentUtils
 
 
@@ -352,6 +351,9 @@ class ConfigManager(BaseModel):
     transfer_monitor_media_server_refresh_enabled: bool = Field(
         default=False, description="刷新媒体服务器开关"
     )
+    transfer_monitor_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="延迟刷新媒体服务器（秒），0 表示不延迟"
+    )
     transfer_monitor_emby_mediainfo_enabled: bool = Field(
         default=False, description="EMBY 媒体信息提取开关"
     )
@@ -403,6 +405,9 @@ class ConfigManager(BaseModel):
     full_sync_media_server_refresh_enabled: bool = Field(
         default=False, description="全量同步刷新媒体服务器开关"
     )
+    full_sync_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="全量同步延迟刷新媒体服务器（秒），0 表示不延迟"
+    )
     full_sync_mediaservers: Optional[List[str]] = Field(
         default=None, description="全量同步刷新媒体服务器列表"
     )
@@ -447,6 +452,9 @@ class ConfigManager(BaseModel):
     )
     increment_sync_media_server_refresh_enabled: bool = Field(
         default=False, description="刷新媒体服务器开关"
+    )
+    increment_sync_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="增量同步延迟刷新媒体服务器（秒），0 表示不延迟"
     )
     increment_sync_mediaservers: Optional[List[str]] = Field(
         default=None, description="刷新媒体服务器"
@@ -493,6 +501,9 @@ class ConfigManager(BaseModel):
     )
     monitor_life_media_server_refresh_enabled: bool = Field(
         default=False, description="刷新媒体服务器开关"
+    )
+    monitor_life_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="生活事件延迟刷新媒体服务器（秒），0 表示不延迟"
     )
     monitor_life_mediaservers: Optional[List[str]] = Field(
         default=None, description="刷新媒体服务器"
@@ -553,6 +564,9 @@ class ConfigManager(BaseModel):
     share_strm_mediaservers: Optional[List[str]] = Field(
         default=None, description="刷新媒体服务器"
     )
+    share_strm_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="分享 STRM 延迟刷新媒体服务器（秒），0 表示不延迟"
+    )
     share_strm_mp_mediaserver_paths: Optional[str] = Field(
         default=None, description="MP-媒体库 目录转换"
     )
@@ -579,6 +593,9 @@ class ConfigManager(BaseModel):
     )
     api_strm_media_server_refresh_enabled: bool = Field(
         default=False, description="刷新媒体服务器开关"
+    )
+    api_strm_media_server_refresh_delay: int = Field(
+        default=0, ge=0, description="API STRM 延迟刷新媒体服务器（秒），0 表示不延迟"
     )
 
     clear_recyclebin_enabled: bool = Field(default=False, description="清理回收站开关")
@@ -651,10 +668,6 @@ class ConfigManager(BaseModel):
         default=None,
         description="TG 搜索频道",
     )
-    hdhive_api_key: Optional[str] = Field(
-        default=None,
-        description="HDHive API Key",
-    )
     hdhive_checkin_username: Optional[str] = Field(
         default=None,
         description="HDHive 签到账户",
@@ -674,6 +687,14 @@ class ConfigManager(BaseModel):
     hdhive_checkin_time_range: Optional[str] = Field(
         default="06:00-09:00",
         description="HDHive 签到随机时间段 HH:MM-HH:MM",
+    )
+    p115_checkin_enabled: bool = Field(
+        default=False,
+        description="115 每日签到",
+    )
+    p115_checkin_time_range: Optional[str] = Field(
+        default="06:00-09:00",
+        description="115 签到随机时间段 HH:MM-HH:MM",
     )
     same_playback: bool = Field(default=False, description="多端播放同一个文件")
 
@@ -793,6 +814,32 @@ class ConfigManager(BaseModel):
         default=False, description="媒体库已存在时拦截整理"
     )
 
+    timeout_enabled: bool = Field(default=True, description="启用请求超时控制")
+    timeout_default_connect: Union[int, float] = Field(
+        default=30, ge=0, description="普通操作连接超时（秒），0 表示不限制"
+    )
+    timeout_default_pool: Union[int, float] = Field(
+        default=15, ge=0, description="普通操作连接池超时（秒），0 表示不限制"
+    )
+    timeout_default_read: Union[int, float] = Field(
+        default=60, ge=0, description="普通操作读取超时（秒），0 表示不限制"
+    )
+    timeout_default_write: Union[int, float] = Field(
+        default=60, ge=0, description="普通操作写入超时（秒），0 表示不限制"
+    )
+    timeout_slow_connect: Union[int, float] = Field(
+        default=30, ge=0, description="慢操作连接超时（秒），0 表示不限制"
+    )
+    timeout_slow_pool: Union[int, float] = Field(
+        default=15, ge=0, description="慢操作连接池超时（秒），0 表示不限制"
+    )
+    timeout_slow_read: Union[int, float] = Field(
+        default=300, ge=0, description="慢操作读取超时（秒），0 表示不限制"
+    )
+    timeout_slow_write: Union[int, float] = Field(
+        default=300, ge=0, description="慢操作写入超时（秒），0 表示不限制"
+    )
+
     @field_serializer(
         "PLUGIN_CONFIG_PATH",
         "PLUGIN_DB_PATH",
@@ -807,7 +854,7 @@ class ConfigManager(BaseModel):
         """
         返回 p115center 许可证
         """
-        return "9a7fd3f1a902cea2042e2315a3b686aec20af7dcd05e022eadc63b5eeac62afd"
+        return "a2d8b7633e56790973910590ab9d135ed9a9cb58967c7b92b05a22579923bb3d"
 
     @property
     def PLUGIN_ALIGO_PATH(self) -> Path:
@@ -953,19 +1000,40 @@ class ConfigManager(BaseModel):
             f"{SystemUtils.cpu_arch() if hasattr(SystemUtils, 'cpu_arch') and callable(SystemUtils.cpu_arch) else 'UnknownArch'})"
         )
 
-    def get_p115_request_extensions(self) -> Dict[str, Any]:
-        """
-        获取 115 API 请求扩展参数，避免底层 httpcore 请求长期阻塞。
-        """
-        return build_p115_timeout_extensions()
+    def get_default_timeout(self) -> Optional[Dict[str, Any]]:
+        if not self.timeout_enabled:
+            return None
+        timeout = {}
+        if self.timeout_default_connect > 0:
+            timeout["connect"] = self.timeout_default_connect
+        if self.timeout_default_pool > 0:
+            timeout["pool"] = self.timeout_default_pool
+        if self.timeout_default_read > 0:
+            timeout["read"] = self.timeout_default_read
+        if self.timeout_default_write > 0:
+            timeout["write"] = self.timeout_default_write
+        return timeout if timeout else None
+
+    def get_slow_timeout(self) -> Optional[Dict[str, Any]]:
+        if not self.timeout_enabled:
+            return None
+        timeout = {}
+        if self.timeout_slow_connect > 0:
+            timeout["connect"] = self.timeout_slow_connect
+        if self.timeout_slow_pool > 0:
+            timeout["pool"] = self.timeout_slow_pool
+        if self.timeout_slow_read > 0:
+            timeout["read"] = self.timeout_slow_read
+        if self.timeout_slow_write > 0:
+            timeout["write"] = self.timeout_slow_write
+        return timeout if timeout else None
 
     def get_ios_ua_app(self, app: bool = True) -> Dict[str, Any]:
         """
-        获取 IOS 设备的 header（UA）、APP 和请求超时配置。
+        获取 IOS 设备的 header（UA）和 APP
         """
         kwargs: Dict[str, Any] = {
             "headers": {"user-agent": self.get_user_agent(5)},
-            "extensions": self.get_p115_request_extensions(),
         }
         if app:
             kwargs["app"] = "ios"

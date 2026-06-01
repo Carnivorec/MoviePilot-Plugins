@@ -8,6 +8,7 @@ P115 请求超时参数测试。
 
 from types import ModuleType, SimpleNamespace
 import importlib
+from pathlib import Path
 import sys
 from unittest import TestCase
 
@@ -38,6 +39,172 @@ class TestP115TimeoutUtils(TestCase):
             result["extensions"]["timeout"],
             {"connect": 9.0, "read": 9.0, "write": 9.0, "pool": 9.0},
         )
+
+
+class TestP115ClientTimeoutWrapper(TestCase):
+    def setUp(self):
+        self._saved_modules = {
+            name: sys.modules.get(name)
+            for name in ["p115client", "app", "app.log", "core.p115_client"]
+        }
+
+        fake_logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
+        fake_p115client = ModuleType("p115client")
+        fake_p115client.P115Client = type("P115Client", (), {})
+        fake_app = ModuleType("app")
+        fake_app_log = ModuleType("app.log")
+        fake_app_log.logger = fake_logger
+
+        sys.modules["p115client"] = fake_p115client
+        sys.modules["app"] = fake_app
+        sys.modules["app.log"] = fake_app_log
+        sys.modules.pop("core.p115_client", None)
+
+    def tearDown(self):
+        for name, module in self._saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def test_wrapper_injects_default_and_slow_timeout(self):
+        client_mod = importlib.import_module("core.p115_client")
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def fs_files(self, **kwargs):
+                self.calls.append(("fs_files", kwargs))
+                return kwargs
+
+            def download_url(self, **kwargs):
+                self.calls.append(("download_url", kwargs))
+                return kwargs
+
+        wrapped = client_mod.create_client_with_timeout(
+            FakeClient(),
+            default_timeout={"connect": 1, "read": 2, "write": 3, "pool": 4},
+            slow_timeout={"connect": 10, "read": 20, "write": 30, "pool": 40},
+        )
+
+        default_result = wrapped.fs_files()
+        slow_result = wrapped.download_url()
+
+        self.assertEqual(
+            default_result["extensions"]["timeout"],
+            {"connect": 1, "read": 2, "write": 3, "pool": 4},
+        )
+        self.assertEqual(
+            slow_result["extensions"]["timeout"],
+            {"connect": 10, "read": 20, "write": 30, "pool": 40},
+        )
+
+    def test_wrapper_preserves_explicit_timeout(self):
+        client_mod = importlib.import_module("core.p115_client")
+
+        class FakeClient:
+            def fs_files(self, **kwargs):
+                return kwargs
+
+        wrapped = client_mod.create_client_with_timeout(
+            FakeClient(),
+            default_timeout={"connect": 1, "read": 2, "write": 3, "pool": 4},
+        )
+        result = wrapped.fs_files(
+            extensions={"trace": "keep", "timeout": {"connect": 9}}
+        )
+
+        self.assertEqual(result["extensions"]["trace"], "keep")
+        self.assertEqual(result["extensions"]["timeout"], {"connect": 9})
+
+    def test_wrapper_propagates_timeout_exception_after_injecting_timeout(self):
+        client_mod = importlib.import_module("core.p115_client")
+
+        class FakeClient:
+            def __init__(self):
+                self.last_kwargs = None
+
+            def fs_files(self, **kwargs):
+                self.last_kwargs = kwargs
+                raise TimeoutError("network timeout")
+
+        wrapped = client_mod.create_client_with_timeout(
+            FakeClient(),
+            default_timeout={"connect": 1, "read": 2, "write": 3, "pool": 4},
+        )
+
+        with self.assertRaises(TimeoutError):
+            wrapped.fs_files()
+
+        self.assertEqual(
+            wrapped.last_kwargs["extensions"]["timeout"],
+            {"connect": 1, "read": 2, "write": 3, "pool": 4},
+        )
+
+
+class TestP115StaticTimeoutCoverage(TestCase):
+    def test_qrcode_static_requests_use_short_timeout(self):
+        api_path = Path(__file__).resolve().parents[1] / "api.py"
+        source = api_path.read_text(encoding="utf-8")
+
+        self.assertIn("build_p115_request_kwargs(timeout=10)", source)
+        self.assertIn("P115Client.login_qrcode_token(**request_kwargs)", source)
+        self.assertIn("P115Client.login_qrcode(_uid, **request_kwargs)", source)
+        self.assertIn(
+            "P115Client.login_qrcode_scan_status(payload, **request_kwargs)",
+            source,
+        )
+        self.assertIn("P115Client.login_qrcode_scan_result(", source)
+
+    def test_get_pid_by_path_preserves_explicit_request_timeout(self):
+        p115_path = Path(__file__).resolve().parents[1] / "core" / "p115.py"
+        source = p115_path.read_text(encoding="utf-8")
+
+        self.assertIn("request_timeout:", source)
+        self.assertIn("apply_p115_request_timeout(kwargs, timeout=request_timeout)", source)
+
+
+class TestP115DiskTimeoutWrapper(TestCase):
+    def test_build_timeout_config_supports_p115disk_defaults(self):
+        saved_modules = {
+            name: sys.modules.get(name)
+            for name in ["p115client", "app", "app.log", "p115disk_timeout_client"]
+        }
+        try:
+            fake_logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
+            fake_p115client = ModuleType("p115client")
+            fake_p115client.P115Client = type("P115Client", (), {})
+            fake_app = ModuleType("app")
+            fake_app_log = ModuleType("app.log")
+            fake_app_log.logger = fake_logger
+            sys.modules["p115client"] = fake_p115client
+            sys.modules["app"] = fake_app
+            sys.modules["app.log"] = fake_app_log
+
+            module_path = (
+                Path(__file__).resolve().parents[2]
+                / "p115disk"
+                / "p115_client.py"
+            )
+            spec = importlib.util.spec_from_file_location(
+                "p115disk_timeout_client", module_path
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["p115disk_timeout_client"] = module
+            spec.loader.exec_module(module)
+
+            self.assertEqual(
+                module.build_timeout_config(True, connect=1, pool=2, read=3, write=4),
+                {"connect": 1, "pool": 2, "read": 3, "write": 4},
+            )
+            self.assertIsNone(module.build_timeout_config(False))
+        finally:
+            for name, module in saved_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
 
 
 class TestUserAgentTimeout(TestCase):

@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from .service import servicer
 from .core.config import configer
+from .core.p115_client import create_client
 from .schemas.donate import DEFAULT_DONATE_INFO as DONATE_INFO
 from .core.cache import idpathcacher, DirectoryCache, r302cacher
 from .core.aliyunpan import AliyunPanLogin
@@ -64,6 +65,15 @@ from .helper.strm.share import (
     share_strm_pending_queue,
 )
 from .schemas.api import ApiResponse
+from .helper.hdhive.open import (
+    DEFAULT_OAUTH_SCOPES,
+    HDHiveSession,
+    broker_exchange,
+    broker_oauth_start,
+    broker_revoke,
+    is_authorized,
+    status_snapshot,
+)
 from .schemas.share import ShareApiData, ShareResponseData, ShareSaveParent
 from .schemas.strm_api import (
     StrmApiPayloadData,
@@ -625,7 +635,11 @@ class Api:
                     configer.update_config({"cookies": _cookies})
                     configer.update_plugin_config()
                     try:
-                        self._client = P115Client(_cookies)
+                        self._client = create_client(
+                            _cookies,
+                            default_timeout=configer.get_default_timeout(),
+                            slow_timeout=configer.get_slow_timeout(),
+                        )
                         self.get_user_storage_status.cache_clear()
                         return ApiResponse(
                             data=CheckQRCodeData(
@@ -1344,7 +1358,9 @@ class Api:
         )
 
     @staticmethod
-    def add_transfer_share(share_url: str = "") -> ShareApiData:
+    def add_transfer_share(
+        share_url: str = "", pan_path: Optional[str] = None
+    ) -> ShareApiData:
         """
         添加分享转存整理
         """
@@ -1356,7 +1372,7 @@ class Api:
 
         try:
             result = servicer.sharetransferhelper.add_share_115(
-                share_url, notify=configer.notify
+                share_url, notify=configer.notify, pan_path=pan_path
             )
         except Exception as e:
             return ShareApiData(code=-1, msg=str(e))
@@ -1895,3 +1911,73 @@ class Api:
         except Exception as e:
             logger.error(f"【STRM备份】恢复备份失败: {e}", exc_info=True)
             return ApiResponse(code=-1, msg=f"恢复备份失败: {str(e)}")
+
+    @staticmethod
+    def hdhive_oauth_start_api(
+        scope: str = Query(default=DEFAULT_OAUTH_SCOPES, description="OAuth scope"),
+    ) -> ApiResponse:
+        """
+        获取 HDHive OAuth 授权 URL（postMessage 模式）
+
+        :param scope: 空格分隔的 scope
+        """
+        try:
+            data = broker_oauth_start(scope=scope.strip() or DEFAULT_OAUTH_SCOPES)
+            return ApiResponse(msg="success", data=data)
+        except Exception as e:
+            logger.error("【HDHive】OAuth start 失败: %s", e, exc_info=True)
+            return ApiResponse(code=-1, msg=f"授权服务不可用: {e}")
+
+    @staticmethod
+    def hdhive_oauth_complete_api(
+        code: str = Body(..., embed=True),
+        state: str = Body(..., embed=True),
+        redirect_uri: str = Body(..., embed=True),
+    ) -> ApiResponse:
+        """
+        完成 OAuth：用授权码换取 Token 并保存
+
+        :param code: 授权码
+        :param state: state
+        :param redirect_uri: 与 start 一致的 redirect_uri
+        """
+        try:
+            data = broker_exchange(
+                code=code.strip(),
+                state=state.strip(),
+                redirect_uri=redirect_uri.strip(),
+            )
+            return ApiResponse(msg="授权成功", data=data)
+        except Exception as e:
+            logger.error("【HDHive】OAuth complete 失败: %s", e, exc_info=True)
+            return ApiResponse(code=-1, msg=f"授权失败: {e}")
+
+    @staticmethod
+    def hdhive_oauth_status_api() -> ApiResponse:
+        """
+        获取 HDHive 鉴权状态（脱敏）
+        """
+        snap = status_snapshot()
+        if snap.get("auth_mode") == "oauth":
+            try:
+                me = HDHiveSession().get_me()
+                snap["user"] = {
+                    "username": me.get("username"),
+                    "nickname": me.get("nickname"),
+                }
+            except Exception as e:
+                logger.debug("【HDHive】get_me 失败: %s", e)
+        snap["enabled"] = is_authorized()
+        return ApiResponse(data=snap)
+
+    @staticmethod
+    def hdhive_oauth_revoke_api() -> ApiResponse:
+        """
+        解除 HDHive OAuth 授权
+        """
+        try:
+            broker_revoke()
+            return ApiResponse(msg="已解除 OAuth 授权")
+        except Exception as e:
+            logger.error("【HDHive】OAuth revoke 失败: %s", e, exc_info=True)
+            return ApiResponse(code=-1, msg=f"解除授权失败: {e}")

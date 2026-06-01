@@ -20,7 +20,7 @@ Telegram 交流群: https://t.me/+1lcscM_EbqhkN2Rl
 
 #### 网盘类插件
 
-- [115网盘存储](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/p115disk)：更快更强的115网盘存储模块。
+- [115网盘储存](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/p115disk)：更快更强的115网盘储存模块。
 - [115网盘STRM助手](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/docs/p115strmhelper)：115网盘STRM生成一条龙服务。
 - [123云盘储存](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/p123disk)：使存储支持123云盘。
 - [123云盘STRM助手](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/p123strmhelper)：123云盘STRM生成一条龙服务。
@@ -31,7 +31,7 @@ Telegram 交流群: https://t.me/+1lcscM_EbqhkN2Rl
 #### 媒体管理类
 
 - [神医媒体文件同步删除](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/samediasyncdel)：通过神医插件通知同步删除历史记录、源文件和下载任务。
-- [ffprobe命名补充](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/ffprobenamingsupplement)：整理重命名时调用 `ffprobe`，补全命名模板中的 `videoFormat`、`videoCodec`、`audioCodec`、`fps`、`effect`，支持 STRM
+- [ffprobe命名补充](https://github.com/DDSRem-Dev/MoviePilot-Plugins/tree/main/plugins.v2/ffprobenamingsupplement)：整理重命名时调用 `ffprobe`，补全命名模板中的 `videoFormat`、`videoCodec`、`videoBit`、`audioCodec`、`fps`、`effect`，支持 STRM
 
 #### 工具类
 
