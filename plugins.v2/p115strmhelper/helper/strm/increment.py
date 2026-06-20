@@ -1,18 +1,11 @@
-from sys import platform as sys_platform
 from collections import deque
-from functools import partial
 from itertools import batched
-from os import close, O_CREAT, O_RDWR, open as os_open
 from pathlib import Path
 from threading import Thread
 from time import perf_counter, sleep
-from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 
 from p115client import P115Client
-from p115client.tool.export_dir import (
-    export_dir_parse_iter,
-    parse_export_dir_as_path_iter,
-)
 from p115client.tool.fs_files import iter_fs_files
 from p115client.tool.iterdir import iterdir
 from sqlalchemy.orm.exc import MultipleResultsFound
@@ -28,6 +21,10 @@ from ...core.scrape import media_scrape_metadata
 from ...db_manager.oper import FileDbHelper
 from ...helper.mediainfo_download import MediaInfoDownloader
 from ...helper.mediaserver import MediaServerRefresh, emby_mediainfo_queue
+from ...helper.strm.export_dir_watchdog import (
+    iter_export_dir_items,
+    run_export_dir_with_watchdog,
+)
 from ...utils.automaton import AutomatonUtils
 from ...utils.base64 import CBase64
 from ...utils.exception import (
@@ -43,24 +40,6 @@ from ...utils.sentry import sentry_manager
 from ...utils.strm import StrmGenerater, StrmUrlGetter
 from ...utils.tree import DirectoryTree
 from ...utils.increment_path_pair import select_pan_path_for_local_path
-
-
-if sys_platform == "win32":
-    from msvcrt import locking as msvcrt_locking, LK_LOCK, LK_UNLCK
-
-    def _flock_ex(fd: int) -> None:
-        msvcrt_locking(fd, LK_LOCK, 1)
-
-    def _flock_un(fd: int) -> None:
-        msvcrt_locking(fd, LK_UNLCK, 1)
-else:
-    from fcntl import flock, LOCK_EX, LOCK_UN
-
-    def _flock_ex(fd: int) -> None:
-        flock(fd, LOCK_EX)
-
-    def _flock_un(fd: int) -> None:
-        flock(fd, LOCK_UN)
 
 
 class IncrementSyncStrmHelper:
@@ -182,32 +161,6 @@ class IncrementSyncStrmHelper:
         self.local_strm_tree.clear()
         self.pan_to_local_strm_tree.clear()
 
-    @staticmethod
-    def _make_throttled_export_dir_wait_logger(
-        interval_sec: Optional[float] = None,
-    ) -> Callable[[], None]:
-        """
-        供 export_dir_parse_iter(show_clock=...) 使用：在等待云端导出目录树时用 info 打日志并按时间节流
-
-        :param interval_sec: 节流间隔秒数，默认使用类属性 _EXPORT_DIR_WAIT_LOG_INTERVAL_SEC
-        """
-        sec = (
-            float(interval_sec)
-            if interval_sec is not None
-            else IncrementSyncStrmHelper._EXPORT_DIR_WAIT_LOG_INTERVAL_SEC
-        )
-        last_t: Optional[float] = None
-
-        def _tick() -> None:
-            nonlocal last_t
-            now = perf_counter()
-            if last_t is not None and (now - last_t) < sec:
-                return
-            last_t = now
-            logger.info("【增量STRM生成】等待 115 云端导出目录树任务...")
-
-        return _tick
-
     def __itertree(
         self, pan_path: str, local_path: str
     ) -> Generator[tuple[str, str], Any, None]:
@@ -220,82 +173,55 @@ class IncrementSyncStrmHelper:
         :return Iterator: 网盘路径迭代器
         :raises PanPathNotFound: 网盘路径不存在
         """
-        from posixpatht import escape as posix_escape
+        output_path = run_export_dir_with_watchdog(
+            pan_path=pan_path,
+            local_path=local_path,
+            cookies=configer.cookies,
+            plugin_temp_path=configer.PLUGIN_TEMP_PATH,
+            status_timeout_config=configer.increment_sync_itertree_timeout_seconds,
+            default_timeout=configer.get_default_timeout(),
+            slow_timeout=configer.get_slow_timeout(),
+            request_kwargs=configer.get_ios_ua_app(app=False),
+        )
+        self.api_count += 4
 
-        lock_path = configer.PLUGIN_TEMP_PATH / "export_dir.lock"
-        lock_fd = os_open(str(lock_path), O_CREAT | O_RDWR)
-
+        items_iterator = iter_export_dir_items(output_path)
         try:
-            _flock_ex(lock_fd)
+            next(items_iterator)
+            relative_path = next(items_iterator)
+        except StopIteration:
+            return
 
-            def custom_escape(name):
-                """
-                处理 115 目录树部分情况下会将 ' 转义为 \'
-                """
-                return posix_escape(name.replace("\\'", "'"))
-
-            relative_path = None
-
-            cid = get_pid_by_path(
-                client=self.client,
-                path=pan_path,
-                mkdir=True,
-                update_cache=False,
-                by_cache=False,
-                request_timeout=10,
+        def process_file_item(item_str: str):
+            item_path = Path(pan_path) / Path(item_str).relative_to(relative_path)
+            relative_item_path = item_path.relative_to(pan_path)
+            local_item_path = Path(local_path) / PathUtils.sanitize_path_parts(
+                relative_item_path
             )
-            if cid == -1:
-                raise PanPathNotFound(f"网盘路径不存在: {pan_path}")
-            self.api_count += 4
 
-            items_iterator = export_dir_parse_iter(
-                client=self.client,
-                export_file_ids=cid,
-                delete=True,
-                show_clock=self._make_throttled_export_dir_wait_logger(),
-                timeout=configer.increment_sync_itertree_timeout_seconds,
-                parse_iter=partial(parse_export_dir_as_path_iter, escape=custom_escape),
-                **configer.get_ios_ua_app(app=False),
-            )
-            try:
-                next(items_iterator)
-                relative_path = next(items_iterator)
-            except StopIteration:
-                return
-
-            def process_file_item(item_str: str):
-                item_path = Path(pan_path) / Path(item_str).relative_to(relative_path)
-                relative_item_path = item_path.relative_to(pan_path)
-                local_item_path = Path(local_path) / PathUtils.sanitize_path_parts(
-                    relative_item_path
+            if item_path.suffix.lower() in self.rmt_mediaext:
+                strm_filename = StrmGenerater.get_strm_filename(local_item_path)
+                yield (
+                    (local_item_path.parent / strm_filename).as_posix(),
+                    item_path.as_posix(),
+                )
+            elif (
+                item_path.suffix.lower() in self.download_mediaext
+                and self.auto_download_mediainfo
+            ):
+                yield (
+                    local_item_path.as_posix(),
+                    item_path.as_posix(),
                 )
 
-                if item_path.suffix.lower() in self.rmt_mediaext:
-                    strm_filename = StrmGenerater.get_strm_filename(local_item_path)
-                    yield (
-                        (local_item_path.parent / strm_filename).as_posix(),
-                        item_path.as_posix(),
-                    )
-                elif (
-                    item_path.suffix.lower() in self.download_mediaext
-                    and self.auto_download_mediainfo
-                ):
-                    yield (
-                        local_item_path.as_posix(),
-                        item_path.as_posix(),
-                    )
-
-            previous_item = None
-            for current_item in items_iterator:
-                if previous_item is not None:
-                    if not current_item.startswith(previous_item + "/"):
-                        yield from process_file_item(previous_item)
-                previous_item = current_item
+        previous_item = None
+        for current_item in items_iterator:
             if previous_item is not None:
-                yield from process_file_item(previous_item)
-        finally:
-            _flock_un(lock_fd)
-            close(lock_fd)
+                if not current_item.startswith(previous_item + "/"):
+                    yield from process_file_item(previous_item)
+            previous_item = current_item
+        if previous_item is not None:
+            yield from process_file_item(previous_item)
 
     def __iterdir(self, cid: int, path: str) -> Iterator:
         """
