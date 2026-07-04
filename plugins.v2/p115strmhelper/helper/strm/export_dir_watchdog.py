@@ -20,7 +20,14 @@ from uuid import uuid4
 
 import httpx
 from p115client import check_response
-from p115client.tool.export_dir import export_dir, parse_export_dir_as_path_iter
+try:
+    from p115client.tool.export_dir import export_dir_start
+except ImportError:  # pragma: no cover - 兼容旧版 p115client
+    from p115client.tool.export_dir import export_dir as export_dir_start
+try:
+    from p115client.tool.export_dir import export_dir_parse_iter_path as parse_export_dir_as_path_iter
+except ImportError:  # pragma: no cover - 兼容旧版 p115client
+    from p115client.tool.export_dir import parse_export_dir_as_path_iter
 
 from app.log import logger
 
@@ -302,7 +309,7 @@ def _write_export_dir_items(
     """
     写入目录树解析结果文件
 
-    :param items: parse_export_dir_as_path_iter 输出路径
+    :param items: export_dir_parse_iter_path / parse_export_dir_as_path_iter 输出路径
     :param output_path: JSONL 结果路径
     :param context: 日志上下文
     :return: 写入数量
@@ -406,7 +413,7 @@ def export_dir_worker_main(
     *,
     client_factory: Optional[Callable[..., Any]] = None,
     get_pid_func: Optional[Callable[..., Any]] = None,
-    export_dir_func: Callable[..., Any] = export_dir,
+    export_dir_func: Callable[..., Any] = export_dir_start,
     parse_iter_func: Callable[..., Any] = parse_export_dir_as_path_iter,
     stream_factory: Callable[..., Any] = httpx.stream,
 ) -> None:
@@ -473,8 +480,8 @@ def export_dir_worker_main(
             context.log("export_submit_start", cid=cid)
             export_id = export_dir_func(
                 client,
-                export_file_ids=cid,
-                target_pid=0,
+                file_ids=cid,
+                target=0,
                 layer_limit=0,
                 **request_kwargs,
             )

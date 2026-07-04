@@ -137,6 +137,8 @@ class FFprobeNamingSupplement(_PluginBase):
     def init_plugin(self, config: dict = None) -> None:
         """
         初始化插件
+
+        :param config (dict): 插件配置字典
         """
         if not config:
             return
@@ -155,6 +157,8 @@ class FFprobeNamingSupplement(_PluginBase):
     def get_state(self) -> bool:
         """
         获取插件状态
+
+        :return bool: 插件是否启用
         """
         return self._enabled
 
@@ -162,16 +166,25 @@ class FFprobeNamingSupplement(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         """
         获取插件命令
+
+        :return List: 插件命令列表
         """
         pass
 
     def get_api(self) -> List[Dict[str, Any]]:
         """
         获取插件API
+
+        :return List: 插件 API 列表
         """
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """
+        拼装插件配置页面
+
+        :return Tuple: (页面配置列表, 表单默认值字典)
+        """
         cls = type(self)
         overwrite_items = [
             {"title": "仅补全缺失或空值", "value": cls._OVERWRITE_FILL_MISSING},
@@ -327,6 +340,8 @@ class FFprobeNamingSupplement(_PluginBase):
     def get_page(self) -> Optional[List[dict]]:
         """
         获取插件页面
+
+        :return List: 页面配置列表
         """
         pass
 
@@ -819,9 +834,11 @@ class FFprobeNamingSupplement(_PluginBase):
     def on_transfer_rename_build(self, event: Event) -> None:
         """
         处理 TransferRenameBuild 链式事件，在主程序首次渲染前把 ffprobe
-        解析到的字段写入 rename_dict。
+        解析到的字段写入 rename_dict
 
-        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突。
+        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突
+
+        :param event (Event): 链式事件对象，包含 rename_dict 与文件路径信息
         """
         if not self._enabled:
             return

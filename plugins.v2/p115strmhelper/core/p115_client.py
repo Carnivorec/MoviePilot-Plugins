@@ -19,7 +19,7 @@ SLOW_METHODS = {
     "share_receive",
     "life_behavior_detail",
     "life_behavior_detail_app",
-    "offline_add_urls",
+    "clouddownload_task_add_urls",
 }
 
 NO_TIMEOUT_METHODS = {
@@ -40,6 +40,82 @@ def _accepts_extra_kwargs(func: Callable) -> bool:
         return any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
     except (ValueError, TypeError):
         return False
+
+
+def _plain_timeout_value(timeout: Any) -> Optional[float]:
+    """
+    从 timeout 配置中提取普通 request 库可识别的 timeout 值
+
+    /* 步骤1：解析普通 timeout
+    ========
+    目标：
+    1) 兼容 httpcore_request 使用的 extensions.timeout。
+    2) 兼容 urllib3_future_request 使用的普通 timeout。
+    数据源：
+    1) timeout 字典或数值。
+    操作要点：
+    1) 字典优先使用 read，其次使用 connect/pool/write。
+    2) 非正数或不可转换值不写入普通 timeout。
+    */
+    """
+    if isinstance(timeout, dict):
+        for key in ("read", "connect", "pool", "write"):
+            try:
+                value = float(timeout[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _inject_request_timeout(
+    kwargs: Dict[str, Any],
+    timeout: Dict[str, Any],
+    method_name: str,
+) -> Dict[str, Any]:
+    """
+    同时注入 extensions.timeout 和普通 timeout
+
+    /* 步骤1：注入双通道 timeout
+    ========
+    目标：
+    1) 让 httpcore_request 读取 extensions.timeout。
+    2) 让 urllib3_future_request 读取普通 timeout。
+    数据源：
+    1) 调用 kwargs。
+    2) 方法对应的 timeout 配置。
+    操作要点：
+    1) 调用者显式传入 extensions.timeout 时不覆盖。
+    2) 调用者显式传入 timeout 时不覆盖。
+    */
+    """
+    logger.info(f"【超时包装】{method_name} 双通道超时注入步骤1开始")
+    extensions = kwargs.get("extensions")
+    if isinstance(extensions, dict):
+        extensions = dict(extensions)
+    else:
+        extensions = {}
+
+    effective_timeout = extensions.get("timeout")
+    if effective_timeout is None:
+        effective_timeout = timeout
+        extensions["timeout"] = timeout
+        kwargs["extensions"] = extensions
+    elif "extensions" not in kwargs or kwargs["extensions"] is not extensions:
+        kwargs["extensions"] = extensions
+
+    if "timeout" not in kwargs:
+        plain_timeout = _plain_timeout_value(effective_timeout)
+        if plain_timeout is not None:
+            kwargs["timeout"] = plain_timeout
+    logger.info(f"【超时包装】{method_name} 双通道超时注入步骤1结束")
+    return kwargs
 
 
 def _make_timeout_wrapper(
@@ -67,12 +143,12 @@ def _make_timeout_wrapper(
                 return attr
 
             def wrapper(*args, **kwargs):
-                if "extensions" in kwargs and "timeout" in kwargs.get("extensions", {}):
-                    logger.debug(f"【超时包装】{name} 调用者已指定超时，跳过注入")
-                    return attr(*args, **kwargs)
-                if "extensions" not in kwargs:
-                    kwargs["extensions"] = {}
-                kwargs["extensions"]["timeout"] = timeout
+                """
+                拦截 API 方法调用，自动注入超时配置到 extensions 参数中
+
+                若调用者已显式指定 extensions["timeout"]，则跳过注入
+                """
+                _inject_request_timeout(kwargs, timeout, name)
                 timeout_type = "慢操作" if name in SLOW_METHODS else "普通"
                 logger.debug(f"【超时包装】{name} 注入{timeout_type}超时: {timeout}")
                 return attr(*args, **kwargs)
@@ -102,6 +178,10 @@ def create_client_with_timeout(
     slow_timeout = slow_timeout or default_timeout
 
     class TimeoutMixin:
+        """
+        超时注入混入类，通过自定义 __getattribute__ 拦截方法调用并注入超时参数
+        """
+
         __getattribute__ = _make_timeout_wrapper(default_timeout, slow_timeout)
 
     wrapper_class = type(
@@ -173,12 +253,12 @@ class P115ClientWithTimeout(P115Client):
                 return attr
 
             def wrapper(*args, **kwargs):
-                if "extensions" in kwargs and "timeout" in kwargs.get("extensions", {}):
-                    logger.debug(f"【超时包装】{name} 调用者已指定超时，跳过注入")
-                    return attr(*args, **kwargs)
-                if "extensions" not in kwargs:
-                    kwargs["extensions"] = {}
-                kwargs["extensions"]["timeout"] = timeout
+                """
+                拦截 API 方法调用，自动注入超时配置到 extensions 参数中
+
+                若调用者已显式指定 extensions["timeout"]，则跳过注入
+                """
+                _inject_request_timeout(kwargs, timeout, name)
                 timeout_type = "慢操作" if name in SLOW_METHODS else "普通"
                 logger.debug(f"【超时包装】{name} 注入{timeout_type}超时: {timeout}")
                 return attr(*args, **kwargs)

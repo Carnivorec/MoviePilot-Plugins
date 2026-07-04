@@ -62,6 +62,12 @@ class FullSyncStrmHelper:
         client: P115Client,
         mediainfodownloader: MediaInfoDownloader,
     ):
+        """
+        初始化全量同步 STRM 生成器
+
+        :param client (P115Client): P115Client 实例
+        :param mediainfodownloader (MediaInfoDownloader): 媒体信息下载器实例
+        """
         self.rmt_mediaext_set = {
             f".{ext.strip()}"
             for ext in configer.user_rmt_mediaext.replace("，", ",").split(",")
@@ -156,9 +162,9 @@ class FullSyncStrmHelper:
         """
         获取删除信息
 
-        :param path_base64: 路径 base64 信息
+        :param path_base64 (str): 路径 base64 信息
 
-        :return: 数据字典
+        :return Dict: 数据字典
         """
         data: dict = configer.get_plugin_data("full_remove_unless_strm")
         if data:
@@ -169,8 +175,8 @@ class FullSyncStrmHelper:
         """
         保存删除信息
 
-        :param path_base64: 路径 base64 信息
-        :param value: 保存字典
+        :param path_base64 (str): 路径 base64 信息
+        :param value (Dict): 保存字典
         """
         data: Dict | None = configer.get_plugin_data("full_remove_unless_strm")
         if data:
@@ -249,9 +255,9 @@ class FullSyncStrmHelper:
         """
         清理无效 STRM 本地扫描
 
-        :param target_dir: 扫描路径
+        :param target_dir (str): 扫描路径
 
-        :return: 扫描进程
+        :return Thread: 扫描进程
         """
         self._clean_tree()
 
@@ -684,6 +690,8 @@ class FullSyncStrmHelper:
     def generate_database(self, full_sync_strm_paths):
         """
         全量更新数据库
+
+        :param full_sync_strm_paths (str): 全量同步路径配置字符串
         """
         media_paths = full_sync_strm_paths.split("\n")
         for path in media_paths:
@@ -773,6 +781,8 @@ class FullSyncStrmHelper:
     def generate_strm_files(self, full_sync_strm_paths):
         """
         生成 STRM 文件
+
+        :param full_sync_strm_paths (str): 全量同步路径配置字符串
         """
         rust = configer.full_sync_process_rust
         media_paths = full_sync_strm_paths.split("\n")
@@ -786,6 +796,9 @@ class FullSyncStrmHelper:
             io_threads.append(thread)
 
         def result_collector():
+            """
+            从结果队列收集 IO 写入线程的处理结果并统计
+            """
             finished_workers = 0
             while finished_workers < num_io_workers:
                 try:
@@ -1089,7 +1102,9 @@ class FullSyncStrmHelper:
                             if rp > configer.full_sync_remove_unless_max_threshold:
                                 # 在阈值范围外，进行数据稳定性测试
                                 logger.warn(
-                                    f"【全量STRM生成】本次将删除文件个数为 {remove_count}，超过安全阈值 {configer.full_sync_remove_unless_max_threshold}% 不进行删除操作"
+                                    f"【全量STRM生成】本次将删除文件个数为 {remove_count}，"
+                                    f"超过安全阈值 {configer.full_sync_remove_unless_max_threshold}% "
+                                    f"不进行删除操作"
                                 )
 
                                 counts.append(remove_count)

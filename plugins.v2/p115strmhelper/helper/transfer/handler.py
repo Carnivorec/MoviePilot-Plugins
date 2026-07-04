@@ -35,8 +35,8 @@ class TransferHandler:
         """
         初始化整理执行器
 
-        :param client: 115 客户端实例
-        :param storage_name: 存储名称
+        :param client (P115Client): 115 客户端实例
+        :param storage_name (str): 存储名称
         """
         self.client = client
         self.storage_name = storage_name
@@ -56,8 +56,8 @@ class TransferHandler:
         """
         判断是否为字幕文件
 
-        :param fileitem: 文件项
-        :return: 是否为字幕文件
+        :param fileitem (FileItem): 文件项
+        :return bool: 是否为字幕文件
         """
         if not fileitem.extension:
             return False
@@ -68,8 +68,8 @@ class TransferHandler:
         """
         判断是否为音频文件
 
-        :param fileitem: 文件项
-        :return: 是否为音频文件
+        :param fileitem (FileItem): 文件项
+        :return bool: 是否为音频文件
         """
         if not fileitem.extension:
             return False
@@ -80,8 +80,8 @@ class TransferHandler:
         """
         与 TransferChain.__is_media_file 一致的主要媒体文件判定（文件项）
 
-        :param fileitem: 文件项
-        :return: 是否为主要媒体文件
+        :param fileitem (FileItem): 文件项
+        :return bool: 是否为主要媒体文件
         """
         if fileitem.type == "dir":
             return StorageChain().is_bluray_folder(fileitem)
@@ -97,8 +97,8 @@ class TransferHandler:
         主视频放最后，使 _record_history 里最后一个 finish_task 对应主视频；同一作业在字幕/音轨
         先完成后再 is_finished，才能通过 _is_media_file 门控发出 MetadataScrape
 
-        :param tasks: 任务列表
-        :return: 排序后的新列表
+        :param tasks (List): 任务列表
+        :return List: 排序后的新列表
         """
 
         def _key(t: TransferTask) -> Tuple[int, str]:
@@ -118,9 +118,9 @@ class TransferHandler:
         """
         创建 MoviePilot TransferTask 对象
 
-        :param task: 插件任务对象
+        :param task (TransferTask): 插件任务对象
 
-        :return: MoviePilot TransferTask 对象
+        :return MPTransferTask: MoviePilot TransferTask 对象
         """
         return MPTransferTask(
             fileitem=task.fileitem,
@@ -136,9 +136,9 @@ class TransferHandler:
         """
         按媒体分组任务
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: 按媒体分组的任务字典，key 为 (media_id, season)
+        :return Dict: 按媒体分组的任务字典，key 为 (media_id, season)
         """
         tasks_by_media: Dict[Tuple, List[TransferTask]] = defaultdict(list)
         for task in tasks:
@@ -159,11 +159,11 @@ class TransferHandler:
         """
         移除已完成的任务组
 
-        :param tasks_by_media: 按媒体分组的任务字典
-        :param task_action: 任务动作，'finish' 或 'fail'
-        :param check_method: 检查方法，'is_finished' 或 'is_done'
+        :param tasks_by_media (Dict): 按媒体分组的任务字典
+        :param task_action (str): 任务动作，'finish' 或 'fail'
+        :param check_method (str): 检查方法，'is_finished' 或 'is_done'
 
-        :return: 移除的任务组数量
+        :return int: 移除的任务组数量
         """
         chain = TransferChain()
         removed_count = 0
@@ -207,9 +207,9 @@ class TransferHandler:
         """
         获取目录，如目录不存在则创建
 
-        :param path: 目录路径
+        :param path (Path): 目录路径
 
-        :return: 目录文件项，如果创建失败则返回None
+        :return FileItem: 目录文件项，如果创建失败则返回None
         """
         folder_item = self.cache_updater._p115_api.get_item(path)
         if folder_item and folder_item.type == "dir":
@@ -249,7 +249,7 @@ class TransferHandler:
         """
         批量处理整理任务
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
         """
         if not tasks:
             logger.warn("【整理接管】任务列表为空，跳过处理")
@@ -376,9 +376,9 @@ class TransferHandler:
         """
         批量创建目标目录
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量创建目标目录")
 
@@ -443,9 +443,9 @@ class TransferHandler:
         """
         批量移动/复制文件（按目标目录分组）
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量移动/复制文件")
 
@@ -633,12 +633,16 @@ class TransferHandler:
                                 if source_size > target_size:
                                     over_flag = True
                                     logger.info(
-                                        f"【整理接管】目标文件已存在，覆盖模式=size，源文件更大 ({source_size} > {target_size})，将覆盖: {target_dir / target_name}"
+                                        f"【整理接管】目标文件已存在，覆盖模式=size，"
+                                        f"源文件更大 ({source_size} > {target_size})，"
+                                        f"将覆盖: {target_dir / target_name}"
                                     )
                                 else:
                                     skip_reason = "媒体库存在同名文件，且质量更好"
                                     logger.info(
-                                        f"【整理接管】目标文件已存在，覆盖模式=size，目标文件质量更好 ({target_size} >= {source_size})，跳过: {target_dir / target_name}"
+                                        f"【整理接管】目标文件已存在，覆盖模式=size，"
+                                        f"目标文件质量更好 ({target_size} >= {source_size})，"
+                                        f"跳过: {target_dir / target_name}"
                                     )
                             elif overwrite_mode == "latest":
                                 over_flag = True
@@ -925,7 +929,7 @@ class TransferHandler:
         """
         批量删除版本文件（latest 模式，目标文件不存在时）
 
-        :param version_delete_tasks: 按目录分组的版本删除任务 {目录: [(目标路径, 任务), ...]}
+        :param version_delete_tasks (Dict): 按目录分组的版本删除任务 {目录: [(目标路径, 任务), ...]}
         """
         for target_dir, tasks in version_delete_tasks.items():
             try:
@@ -941,18 +945,18 @@ class TransferHandler:
                     logger.debug(f"【整理接管】目录 {target_dir} 中没有文件")
                     continue
 
-                # 收集需要删除的文件（按季集分组）
+                # 收集需要删除的文件（按季集 Part 分组）
                 files_to_delete_by_se: Dict[
-                    Tuple[Optional[str], Optional[str]], List[FileItem]
+                    Tuple[Optional[str], Optional[str], Optional[str]], List[FileItem]
                 ] = defaultdict(list)
 
-                # 收集所有目标文件的季集信息
-                target_seasons_episodes: Set[Tuple[Optional[str], Optional[str]]] = (
-                    set()
-                )
+                # 收集所有目标文件的季集 Part 信息
+                target_seasons_episodes: Set[
+                    Tuple[Optional[str], Optional[str], Optional[str]]
+                ] = set()
                 for target_path, _ in tasks:
                     meta = MetaInfoPath(target_path)
-                    target_seasons_episodes.add((meta.season, meta.episode))
+                    target_seasons_episodes.add((meta.season, meta.episode, meta.part))
 
                 if not target_seasons_episodes:
                     logger.debug(
@@ -975,14 +979,15 @@ class TransferHandler:
                     if file_ext not in settings.RMT_MEDIAEXT:
                         continue
 
-                    # 识别文件中的季集信息
+                    # 识别文件中的季集 Part 信息
                     file_meta = MetaInfoPath(Path(file.path))
-                    file_se: Tuple[Optional[str], Optional[str]] = (
+                    file_se: Tuple[Optional[str], Optional[str], Optional[str]] = (
                         file_meta.season,
                         file_meta.episode,
+                        file_meta.part,
                     )
 
-                    # 检查是否与任何目标文件的季集匹配
+                    # 检查是否与任何目标文件的季集 Part 匹配
                     if file_se in target_seasons_episodes:
                         # 检查是否为目标文件本身（通过路径匹配）
                         is_target_file = False
@@ -1041,8 +1046,8 @@ class TransferHandler:
         """
         批量更新复制后的 文件 ID
 
-        :param target_dir: 目标目录
-        :param file_mapping: 文件ID到 (任务, 目标文件名, 源文件项) 的映射
+        :param target_dir (Path): 目标目录
+        :param file_mapping (Dict): 文件ID到 (任务, 目标文件名, 源文件项) 的映射
         """
         try:
             target_dir_fileitem = FileItem(
@@ -1090,9 +1095,9 @@ class TransferHandler:
         """
         批量重命名文件
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量重命名文件")
 
@@ -1139,7 +1144,7 @@ class TransferHandler:
         """
         记录转移历史
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
         """
         logger.info("【整理接管】开始记录转移历史")
 
@@ -1339,7 +1344,7 @@ class TransferHandler:
         """
         批量删除空目录
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
         """
         try:
             chain = TransferChain()
@@ -1623,9 +1628,9 @@ class TransferHandler:
         """
         收集需要删除的空目录
 
-        :param fileitem: 文件项
+        :param fileitem (FileItem): 文件项
 
-        :return: 需要删除的目录列表
+        :return List: 需要删除的目录列表
         """
         dirs_to_delete: List[FileItem] = []
         media_exts = (
@@ -1744,8 +1749,8 @@ class TransferHandler:
         """
         从插件整理任务构造目标文件与目标目录的 FileItem（与成功历史一致）
 
-        :param task: 插件 TransferTask
-        :return: (target_item, target_diritem)
+        :param task (TransferTask): 插件 TransferTask
+        :return Tuple: (target_item, target_diritem)
         """
         target_fileitem = FileItem(
             storage=self.storage_name,
@@ -1771,7 +1776,7 @@ class TransferHandler:
         """
         批量记录失败历史
 
-        :param failed_tasks: 失败任务列表，每个元素为 (task, error_message)
+        :param failed_tasks (List): 失败任务列表，每个元素为 (task, error_message)
         """
         if not failed_tasks:
             return
@@ -1807,8 +1812,8 @@ class TransferHandler:
         """
         记录失败历史并处理失败任务
 
-        :param task: 任务
-        :param message: 失败原因
+        :param task (TransferTask): 任务
+        :param message (str): 失败原因
         """
         try:
             try:
@@ -1912,6 +1917,7 @@ class TransferHandler:
                         else None,
                         username=task.username,
                         link=settings.MP_DOMAIN("#/history"),
+                        save_history=False,
                     )
                 )
             except Exception as e:

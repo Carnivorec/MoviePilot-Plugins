@@ -3,6 +3,7 @@ from io import BytesIO
 from datetime import datetime
 from dataclasses import asdict
 from time import time, sleep
+from traceback import format_exc
 from typing import Any, Dict, Iterator, Optional, cast
 from pathlib import Path
 from threading import Thread
@@ -12,6 +13,7 @@ from p115center import P115Center
 from qrcode import make as qr_make
 from orjson import dumps, loads
 from p115client import P115Client, check_response
+from p115client.const import APP_TO_SSOENT
 from p115client.exception import P115DataError
 from p115client.tool.fs_files import iter_fs_files
 from fastapi import Body, Request, Response, Depends, status, Query
@@ -126,7 +128,7 @@ class Api:
         """
         获取 Machine ID
         """
-        return MachineID(machine_id=configer.MACHINE_ID)
+        return MachineID(machine_id=configer.machine_id)
 
     @staticmethod
     def generate_media_redirect_config_api(
@@ -304,7 +306,7 @@ class Api:
     )
     def get_user_storage_status(self) -> UserStorageStatusResponse:
         """
-        获取 115 用户基本信息和空间使用情况。
+        获取 115 用户基本信息和空间使用情况
         """
         if not configer.get_config("cookies"):
             return UserStorageStatusResponse(
@@ -398,7 +400,7 @@ class Api:
             )
 
         except Exception as e:
-            logger.error(f"【用户存储状态】获取信息时发生意外错误: {e}", exc_info=True)
+            logger.error(f"【用户存储状态】获取信息时发生意外错误: {e}\n{format_exc()}")
             error_str_lower = str(e).lower()
             if (
                 isinstance(e, P115DataError)
@@ -513,7 +515,7 @@ class Api:
                 )
                 return response_data
             except Exception as e:
-                logger.error(f"浏览网盘目录 API 原始错误: {str(e)}")
+                logger.error(f"浏览网盘目录 API 原始错误: {str(e)}\n{format_exc()}")
                 return ApiResponse(code=1, msg=f"浏览网盘目录失败: {str(e)}")
 
     @staticmethod
@@ -522,34 +524,29 @@ class Api:
         获取登录二维码
         """
         try:
-            final_client_type = params.client_type
-            allowed_types = [
-                "web",
-                "android",
-                "115android",
-                "ios",
-                "115ios",
-                "alipaymini",
-                "wechatmini",
-                "115ipad",
-                "tv",
-                "qandroid",
-            ]
-            if final_client_type not in allowed_types:
+            final_client_type = (params.client_type or "").strip()
+            if final_client_type not in APP_TO_SSOENT:
                 final_client_type = "alipaymini"
             logger.info(f"【扫码登入】二维码API - 使用客户端类型: {final_client_type}")
 
             request_kwargs = build_p115_request_kwargs(timeout=10)
             resp = P115Client.login_qrcode_token(**request_kwargs)
             check_response(resp)
-            resp_info = resp.get("data", {})
+            resp_info = resp.get("data") or {}
             _uid = str(resp_info.get("uid", ""))
             _time = str(resp_info.get("time", ""))
             _sign = str(resp_info.get("sign", ""))
-            resp = P115Client.login_qrcode(_uid, **request_kwargs)
-            if not isinstance(resp, (bytes, bytearray)):
-                return ApiResponse(code=-1, msg="获取二维码失败: 返回内容类型异常")
-            qrcode_base64 = b64encode(resp).decode("utf-8")
+            if not _uid or not _time or not _sign:
+                return ApiResponse(code=-1, msg="获取二维码失败: 返回登录参数不完整")
+
+            qrcode_content = str(resp_info.get("qrcode") or "")
+            if not qrcode_content:
+                qrcode_content = f"https://115.com/scan/dg-{_uid}"
+
+            img = qr_make(qrcode_content)
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            qrcode_base64 = b64encode(buffered.getvalue()).decode("utf-8")
 
             return ApiResponse(
                 data=QRCodeData(
@@ -575,6 +572,9 @@ class Api:
         try:
             if not uid:
                 return ApiResponse(code=-1, msg="无效的二维码ID，参数uid不能为空")
+            final_client_type = (client_type or "").strip()
+            if final_client_type not in APP_TO_SSOENT:
+                final_client_type = "alipaymini"
             payload = {
                 "uid": uid,
                 "time": _time,
@@ -585,7 +585,7 @@ class Api:
             if not isinstance(resp, dict):
                 return ApiResponse(code=-1, msg="检查二维码状态异常: 返回数据类型异常")
             check_response(resp)
-            status_code = resp.get("data").get("status")
+            status_code = (resp.get("data") or {}).get("status")
         except Exception as e:
             error_msg = f"检查二维码状态异常: {str(e)}"
             logger.error(f"【扫码登入】检查二维码状态异常: {e}", exc_info=True)
@@ -608,7 +608,7 @@ class Api:
             try:
                 request_kwargs = build_p115_request_kwargs(timeout=10)
                 resp = P115Client.login_qrcode_scan_result(
-                    uid, app=client_type, **request_kwargs
+                    uid, app=final_client_type, **request_kwargs
                 )
                 if not isinstance(resp, dict):
                     return ApiResponse(
@@ -1346,14 +1346,7 @@ class Api:
             data=PluginStatusData(
                 enabled=configer.get_config("enabled"),
                 has_client=bool(servicer.client),
-                running=(
-                    bool(servicer.scheduler.get_jobs()) if servicer.scheduler else False
-                )
-                or bool(
-                    servicer.monitor_life_thread
-                    and servicer.monitor_life_thread.is_alive()
-                )
-                or bool(servicer.service_observer),
+                running=servicer.is_background_active(),
             )
         )
 
@@ -1442,7 +1435,7 @@ class Api:
         判断是否有权限使用此增强功能
         """
         try:
-            client = P115Center(configer.get_config("MACHINE_ID"))
+            client = P115Center(configer.get_config("machine_id"))
             resp = client.check_feature(name)
             return MachineIDFeature(**resp)
         except Exception:
@@ -1458,7 +1451,7 @@ class Api:
         获取机器授权状态
         """
         try:
-            client = P115Center(configer.get_config("MACHINE_ID"))
+            client = P115Center(configer.get_config("machine_id"))
             resp = client.get_authorization_status()
             if resp:
                 return ApiResponse(code=0, msg="获取授权状态成功", data=resp)
@@ -1830,7 +1823,16 @@ class Api:
             if not task:
                 return ApiResponse(code=-1, msg=f"备份任务不存在: {task_name}")
 
-            servicer.start_backup_task(task)
+            if servicer.backup_service.is_backup_task_running(task_name):
+                return ApiResponse(code=-1, msg=f"备份任务正在运行中: {task_name}")
+
+            if not servicer.backup_service.start_backup_task(task):
+                if servicer.backup_service.is_backup_task_running(task_name):
+                    return ApiResponse(code=-1, msg=f"备份任务正在运行中: {task_name}")
+                return ApiResponse(
+                    code=-1,
+                    msg=f"备份任务调度失败，请稍后重试: {task_name}",
+                )
             return ApiResponse(msg=f"备份任务已启动: {task_name}")
         except Exception as e:
             logger.error(f"【STRM备份】启动备份任务失败: {e}", exc_info=True)
@@ -1903,10 +1905,19 @@ class Api:
             if not task:
                 return ApiResponse(code=-1, msg=f"备份任务不存在: {task_name}")
 
-            servicer.start_restore_task(
+            if servicer.backup_service.is_backup_task_running(task_name):
+                return ApiResponse(code=-1, msg=f"恢复任务正在运行中: {task_name}")
+
+            if not servicer.backup_service.start_restore_task(
                 task_name=task_name,
                 backup_path=backup_path,
-            )
+            ):
+                if servicer.backup_service.is_backup_task_running(task_name):
+                    return ApiResponse(code=-1, msg=f"恢复任务正在运行中: {task_name}")
+                return ApiResponse(
+                    code=-1,
+                    msg=f"恢复任务调度失败，请稍后重试: {task_name}",
+                )
             return ApiResponse(msg="恢复任务已启动，后台执行中")
         except Exception as e:
             logger.error(f"【STRM备份】恢复备份失败: {e}", exc_info=True)

@@ -12,18 +12,29 @@ class UserAgentUtils:
     """
 
     @staticmethod
+    @cached(region="p115strmhelper_util_real_app_ver", ttl=60 * 60, skip_none=True)
+    def get_real_app_ver() -> str:
+        """
+        获取 115 Android 端真实版本号
+
+        :return str: 形如 "37.2.5" 的版本号
+        """
+        try:
+            resp = P115Client.app_version_list2()
+            check_response(resp)
+            return resp["data"]["Android"]["version_code"]
+        except Exception:
+            return "37.2.5"
+
+    @staticmethod
     @cached(
         region="p115strmhelper_util_user_agent_u115_ios", ttl=60 * 60, skip_none=True
     )
     def generate_u115_ios() -> str:
         """
-        各段含义与生成规则：
+        生成 115 iOS User-Agent 字符串
 
-        - iOS 版本：iPhone OS {major}_{minor}，从常见版本中随机（如 15_0～18_1）
-        - Build：Mobile/{build}，Apple 风格 build 号（数字+字母+3 位数字，如 15E148、21A258）
-        - AppleWebKit：与 iOS 大版本对应的 WebKit 版本（如 605.1.15）
-
-        :return: 完整的 User-Agent 字符串
+        :return str: 完整的 User-Agent 字符串
         """
         try:
             resp = P115Client.app_version_list2(

@@ -27,6 +27,11 @@ class TransferHandlerLinkedBatch:
     """
 
     def __init__(self, handler: "TransferHandler") -> None:
+        """
+        初始化关联批量整理处理器
+
+        :param handler (TransferHandler): 所属的 TransferHandler 实例
+        """
         self._handler = handler
 
     def batch_create_directories(
@@ -35,9 +40,9 @@ class TransferHandlerLinkedBatch:
         """
         批量创建目标目录
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量创建目标目录")
 
@@ -111,9 +116,9 @@ class TransferHandlerLinkedBatch:
         """
         批量移动/复制文件（按目标目录分组）
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量移动/复制文件")
 
@@ -341,12 +346,16 @@ class TransferHandlerLinkedBatch:
                                 if source_size > target_size:
                                     over_flag = True
                                     logger.info(
-                                        f"【整理接管】目标文件已存在，覆盖模式=size，源文件更大 ({source_size} > {target_size})，将覆盖: {target_dir / target_name}"
+                                        f"【整理接管】目标文件已存在，覆盖模式=size，"
+                                        f"源文件更大 ({source_size} > {target_size})，"
+                                        f"将覆盖: {target_dir / target_name}"
                                     )
                                 else:
                                     skip_reason = "媒体库存在同名文件，且质量更好"
                                     logger.info(
-                                        f"【整理接管】目标文件已存在，覆盖模式=size，目标文件质量更好 ({target_size} >= {source_size})，跳过: {target_dir / target_name}"
+                                        f"【整理接管】目标文件已存在，覆盖模式=size，"
+                                        f"目标文件质量更好 ({target_size} >= {source_size})，"
+                                        f"跳过: {target_dir / target_name}"
                                     )
                             elif overwrite_mode == "latest":
                                 over_flag = True
@@ -722,8 +731,8 @@ class TransferHandlerLinkedBatch:
         """
         批量更新复制后的 文件 ID
 
-        :param target_dir: 目标目录
-        :param file_mapping: 文件ID到任务信息的映射
+        :param target_dir (Path): 目标目录
+        :param file_mapping (Dict): 文件ID到任务信息的映射
         """
         try:
             # 获取目标目录的文件列表
@@ -793,9 +802,9 @@ class TransferHandlerLinkedBatch:
         """
         批量重命名文件
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
 
-        :return: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量重命名文件")
 
@@ -854,7 +863,7 @@ class TransferHandlerLinkedBatch:
         """
         记录转移历史
 
-        :param tasks: 任务列表
+        :param tasks (List): 任务列表
         """
         logger.info("【整理接管】开始记录转移历史")
 

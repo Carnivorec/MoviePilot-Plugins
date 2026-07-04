@@ -102,7 +102,7 @@ jobs:
     steps:
       # 步骤1：检出代码库
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # 步骤2：下载并解压源码包
       - name: 下载并解压源码包
@@ -134,7 +134,7 @@ jobs:
 
       # 步骤5：使用 cibuildwheel 构建 wheel 文件
       - name: 构建 Wheel
-        uses: pypa/cibuildwheel@v3.4.1
+        uses: pypa/cibuildwheel@v4.1.0
         env:
           CIBW_BUILD: ${{ steps.vars.outputs.cibw_build_version }}
           CIBW_OUTPUT_DIR: wheels
@@ -160,7 +160,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: 确定最终提交目录
         id: set_path

@@ -58,6 +58,14 @@ class TransferChainPatcher:
                 def patched_handle_transfer(
                     self, task, callback: Optional[Callable] = None
                 ) -> Optional[Tuple[bool, str]]:
+                    """
+                    补丁版 TransferChain 整理方法，拦截 115 → 115 的整理任务并委托给插件处理
+
+                    :param self: TransferChain 实例
+                    :param task: MoviePilot TransferTask
+                    :param callback: 可选的完成回调
+                    :return: (成功状态, 消息) 或 None
+                    """
                     return cls._patched_handle_transfer(self, task, callback)
 
                 # 应用补丁
@@ -120,6 +128,7 @@ class TransferChainPatcher:
             transferhis = TransferHistoryOper()
             mediainfo = task.mediainfo
             mediainfo_changed = False
+            need_obtain_images = False
             if not mediainfo:
                 download_history = task.download_history
                 # 下载用户
@@ -134,16 +143,19 @@ class TransferChainPatcher:
                             doubanid=download_history.doubanid,
                             episode_group=download_history.episode_group,
                         )
+                        need_obtain_images = True
                         if mediainfo:
                             # 更新自定义媒体类别
                             if download_history.media_category:
                                 mediainfo.category = download_history.media_category
                 else:
-                    # 识别媒体信息
-                    mediainfo = MediaChain().recognize_by_meta(task.meta)
+                    # 识别媒体信息（obtain_images=True 内部已完成图片获取）
+                    mediainfo = MediaChain().recognize_by_meta(
+                        task.meta, obtain_images=True
+                    )
 
-                # 更新媒体图片
-                if mediainfo:
+                # 按名称识别时已在识别链路补图，这里只补齐显式ID识别的场景
+                if mediainfo and need_obtain_images:
                     chain_self.obtain_images(mediainfo=mediainfo)
 
                 if not mediainfo:
@@ -162,9 +174,18 @@ class TransferChainPatcher:
                         Notification(
                             mtype=NotificationType.Manual,
                             title=f"{task.fileitem.name} 未识别到媒体信息，无法入库！",
-                            text=f"回复：```\n/redo {his.id} [tmdbid]|[类型]\n``` 手动识别整理。",
+                            text=(
+                                "原因：未识别到媒体信息\n"
+                                "如果按钮不可用，可回复：\n"
+                                f"```\n/redo {his.id}\n/redo {his.id} [tmdbid]|[类型]\n```\n"
+                                "自动重试或手动识别整理。"
+                            ),
                             username=task.username,
                             link=settings.MP_DOMAIN("#/history"),
+                            buttons=chain_self.build_failed_transfer_buttons(
+                                his.id if his else None
+                            ),
+                            save_history=False,
                         )
                     )
                     # 任务失败，直接移除task
@@ -407,8 +428,9 @@ class TransferChainPatcher:
                 logger.error(f"【整理接管】回退到原方法也失败: {fallback_error}")
                 return False, f"整理异常: {e}"
         finally:
-            # 与原生 __handle_transfer 一致：每次处理完尝试移除已完成作业
+            # 与原生 __handle_transfer 一致：每次处理完尝试移除已完成作业，并清理批次 pending 集合
             chain_self.jobview.try_remove_job(task)
+            chain_self._TransferChain__finish_scrape_batch_task(task)
 
     @classmethod
     def _derive_transfer_flags(cls, task) -> Tuple[bool, bool, bool]:

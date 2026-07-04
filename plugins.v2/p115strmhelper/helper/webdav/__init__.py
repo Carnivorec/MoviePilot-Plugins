@@ -20,11 +20,11 @@ from p115client.tool import (
     traverse_tree_with_path,
     P115QueryDB,
 )
-from sqlitedict import SqliteTableDict
 from yarl import URL
 
 from app.log import logger
 
+from ._sqlitedict import SqliteTableDict
 from ...core.config import configer
 from ...utils.time import TimeUtils
 from ...utils.p115_timeout import build_p115_request_kwargs
@@ -42,6 +42,14 @@ class WebdavCore:
         cache_url: bool = True,
         cache_propfind: bool = True,
     ):
+        """
+        初始化 WebDAV 核心模块
+
+        :param client (P115Client): P115Client 实例
+        :param cache_dir_ttl (float): 目录缓存 TTL（秒）
+        :param cache_url (bool): 是否启用 URL 缓存
+        :param cache_propfind (bool): 是否启用 PROPFIND 缓存
+        """
         self.client = client
         self.cache_attr: LRUDict[int | str, dict] = LRUDict(65536)
         self.cache_children: TTLDict[int, dict[str, dict]] = TTLDict(
@@ -70,6 +78,12 @@ class WebdavCore:
             self.querydb = P115QueryDB(con)
 
     async def get_attr(self, path: int | str, /) -> dict:
+        """
+        获取文件或目录的属性
+
+        :param path (int | str): 文件路径（str）或 115 文件 ID（int）
+        :return Dict: 文件属性字典
+        """
         if isinstance(path, str):
             path = "/" + path.strip("/")
             if path == "/":
@@ -110,6 +124,13 @@ class WebdavCore:
         return attr
 
     async def get_children(self, id: int, /, refresh: bool = False) -> dict[str, dict]:
+        """
+        获取目录的子项列表
+
+        :param id (int): 目录 ID
+        :param refresh (bool): 是否强制刷新缓存
+        :return Dict: 以名称为键的子项属性字典
+        """
         start = time()
         async with self.cache_lock.setdefault(id, Lock()):
             children: None | dict[str, dict]
@@ -135,6 +156,12 @@ class WebdavCore:
             return children
 
     async def iter_descentants(self, id: int, /) -> AsyncIterator[dict]:
+        """
+        递归遍历目录下的所有后代（文件与子目录）
+
+        :param id (int): 起始目录 ID
+        :return AsyncIterator: 异步迭代器，产出文件/目录属性字典
+        """
         async for attr in traverse_tree_with_path(
             self.client,
             id,
@@ -149,6 +176,14 @@ class WebdavCore:
     async def get_url(
         self, id: int | str, /, user_agent: str = "", refresh: bool = False
     ) -> str:
+        """
+        获取文件的下载直链
+
+        :param id (int | str): 文件 ID 或 pickcode
+        :param user_agent (str): 请求时使用的 User-Agent
+        :param refresh (bool): 是否强制刷新缓存
+        :return str: 下载直链 URL
+        """
         pickcode = self.client.to_pickcode(id)
         id = self.client.to_id(pickcode)
         if (
@@ -178,6 +213,12 @@ class WebdavCore:
 
     @staticmethod
     def iter_response_parts(attr):
+        """
+        生成单个资源在 PROPFIND 响应中的 XML 片段
+
+        :param attr (Dict): 文件属性字典
+        :return Generator: 生成器，产出 XML 字符串片段
+        """
         if attr["id"]:
             href = f"/<{attr['id']}/{quote(attr['name'])}"
         else:
@@ -206,6 +247,16 @@ class WebdavCore:
         pickcode: str = "",
         refresh: bool = False,
     ):
+        """
+        处理 WebDAV PROPFIND 请求，返回目录列表的 XML 响应
+
+        :param request (Request): FastAPI Request 对象
+        :param path (str): 请求路径
+        :param id (int): 115 目录 ID（优先级高于 path）
+        :param pickcode (str): 文件 pickcode
+        :param refresh (bool): 是否强制刷新缓存
+        :return Response: FastAPI Response 对象，状态码 207
+        """
         if id >= 0:
             fid: int | str = id
         elif pickcode:
@@ -261,6 +312,16 @@ class WebdavCore:
         pickcode: str = "",
         refresh: bool = False,
     ):
+        """
+        处理 WebDAV GET 请求，返回文件内容或目录列表
+
+        :param request (Request): FastAPI Request 对象
+        :param path (str): 请求路径
+        :param id (int): 115 文件 ID
+        :param pickcode (str): 文件 pickcode
+        :param refresh (bool): 是否强制刷新缓存
+        :return RedirectResponse: 重定向响应或目录内容
+        """
         if id >= 0:
             pickcode = self.client.to_pickcode(id)
         elif pickcode:
@@ -287,4 +348,9 @@ class WebdavCore:
 
     @staticmethod
     async def options():
+        """
+        处理 WebDAV OPTIONS 请求
+
+        :return bytes: 空字节串
+        """
         return b""

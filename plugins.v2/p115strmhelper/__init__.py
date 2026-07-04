@@ -53,6 +53,7 @@ from .db_manager.init import init_db, migration_db, init_migration_scripts
 from .mcp import MCPManager
 from .patch.u115_open import U115Patcher
 from .patch.p115disk_upload import P115DiskPatcher
+from .patch.app_ver import AppVerPatcher
 from .core.message import UploadNotifyAggregator
 from .interactive.framework.callbacks import decode_action, Action
 from .interactive.framework.manager import BaseSessionManager
@@ -65,7 +66,7 @@ from .helper.strm import (
     ShareInteractiveGenStrmQueue,
     TransferStrmHelper,
 )
-from .helper.hdhive.open import is_authorized
+from .helper.hdhive.browser import is_hdhive_search_ready
 from .helper.strm.full import strm_cleanup_interaction
 from .helper.mediasyncdel import MediaSyncDelHelper
 from .helper.mediasyncdel.webhook_queue import (
@@ -103,12 +104,19 @@ session_manager = BaseSessionManager(session_class=Session)
 
 @sentry_manager.capture_all_class_exceptions
 class P115StrmHelper(_PluginBase):
+    """
+    115网盘STRM助手插件入口，提供STRM生成、分享转存、离线下载、302跳转、FUSE挂载等功能
+    """
+
     # 插件名称
     plugin_name = "115网盘STRM助手"
     # 插件描述
     plugin_desc = "115网盘STRM生成一条龙服务"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
+    plugin_icon = (
+        "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/"
+        "refs/heads/v2/src/assets/images/misc/u115.png"
+    )
     # 插件版本
     plugin_version = VERSION
     # 插件作者
@@ -134,8 +142,23 @@ class P115StrmHelper(_PluginBase):
         """
 
         def decorator(func):
+            """
+            数据库操作装饰器，捕获异常并记录日志
+
+            :param func: 被装饰的数据库操作函数
+            :return: 包装后的函数
+            """
+
             @wraps(func)
             def wrapper(self, *args, **kwargs):
+                """
+                包装函数：执行操作、捕获异常、合并日志消息
+
+                :param self: P115StrmHelper 实例
+                :param args: 位置参数
+                :param kwargs: 关键字参数
+                :return: 原函数返回值，失败返回 False
+                """
                 level, text = "success", f"{oper_name} 成功"
                 try:
                     result = func(self, *args, **kwargs)
@@ -190,6 +213,8 @@ class P115StrmHelper(_PluginBase):
         self.stop_service()
 
         if configer.enabled:
+            AppVerPatcher().enable()
+
             self.init_database()
 
             if servicer.init_service():
@@ -611,34 +636,6 @@ class P115StrmHelper(_PluginBase):
                 "summary": "判断是否有权限使用此增强功能",
             },
             {
-                "path": "/hdhive/oauth/start",
-                "endpoint": self.api.hdhive_oauth_start_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "HDHive OAuth 授权开始",
-            },
-            {
-                "path": "/hdhive/oauth/complete",
-                "endpoint": self.api.hdhive_oauth_complete_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "HDHive OAuth 授权完成",
-            },
-            {
-                "path": "/hdhive/oauth/status",
-                "endpoint": self.api.hdhive_oauth_status_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "HDHive OAuth 状态",
-            },
-            {
-                "path": "/hdhive/oauth/revoke",
-                "endpoint": self.api.hdhive_oauth_revoke_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "HDHive OAuth 解除授权",
-            },
-            {
                 "path": "/get_authorization_status",
                 "endpoint": self.api.get_authorization_status_api,
                 "methods": ["GET"],
@@ -945,7 +942,7 @@ class P115StrmHelper(_PluginBase):
                             "id": f"P115StrmHelper_strm_backup_{backup_item.name}",
                             "name": f"STRM 定时备份-{backup_item.name}",
                             "trigger": CronTrigger.from_crontab(backup_item.cron),
-                            "func": servicer.run_backup_task,
+                            "func": servicer.backup_service.run_backup_task,
                             "func_kwargs": {"task_name": backup_item.name},
                         }
                     )
@@ -962,8 +959,8 @@ class P115StrmHelper(_PluginBase):
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """
-        为Vue组件模式返回初始配置数据。
-        Vue模式下，第一个参数返回None，第二个参数返回初始配置数据。
+        为Vue组件模式返回初始配置数据
+        Vue模式下，第一个参数返回None，第二个参数返回初始配置数据
         """
         return None, self.api.get_config_api()
 
@@ -1236,7 +1233,7 @@ class P115StrmHelper(_PluginBase):
         userid = self._get_event_userid(event_data)
 
         has_tg = bool(configer.tg_search_channels)
-        has_hdhive = is_authorized()
+        has_hdhive = is_hdhive_search_ready()
         if not has_tg and not has_hdhive:
             post_message(
                 channel=event.event_data.get("channel"),
@@ -1378,7 +1375,7 @@ class P115StrmHelper(_PluginBase):
 
     def _render_and_send(self, session: TSession):
         """
-        根据 Session 的当前状态，渲染视图并发送/编辑消息。
+        根据 Session 的当前状态，渲染视图并发送/编辑消息
         """
         # 1. 委托给 ViewRenderer 生成界面数据
         render_data = self.view_renderer.render(session)
@@ -1399,7 +1396,7 @@ class P115StrmHelper(_PluginBase):
         self, session: TSession, render_data: Optional[dict] = None, **kwargs
     ):
         """
-        统一的消息发送接口。
+        统一的消息发送接口
         """
         context = asdict(session.message)
         if render_data:
@@ -1421,7 +1418,7 @@ class P115StrmHelper(_PluginBase):
         chat_id: Optional[Union[str, int]] = None,
     ) -> bool:
         """
-        删除会话中的原始消息。
+        删除会话中的原始消息
         """
         # 兼容旧版本无删除方法
         if hasattr(self.chain, "delete_message"):
@@ -1841,9 +1838,9 @@ class P115StrmHelper(_PluginBase):
 
         响应主程序渲染前的 TransferRenameBuild 事件，通过 ffprobe / 中心化接口
         获取真实媒体信息（如 effect=SDR/HDR、视频/音频编码等），写回
-        ``event_data.rename_dict``。
+        ``event_data.rename_dict``
 
-        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突。
+        与渲染后的 TransferRename 字符串改写类插件天然分层、互不冲突
         """
         if not configer.enabled:
             return
@@ -1873,6 +1870,12 @@ class P115StrmHelper(_PluginBase):
             return
 
         def share_strm_center(url: str) -> Optional[Dict[str, Any]]:
+            """
+            从中心化服务获取分享STRM的媒体信息
+
+            :param url: 包含 share_code、receive_code、id 参数的 STRM URL
+            :return: 媒体信息字典，获取失败返回 None
+            """
             for i in ["P115StrmHelper", "share_code=", "receive_code=", "id="]:
                 if i not in url:
                     return None
@@ -1956,7 +1959,10 @@ class P115StrmHelper(_PluginBase):
                 cur = data.rename_dict.get(key)
                 if isinstance(cur, str):
                     cur_stripped = cur.strip()
-                    if cur_stripped and (key != "audioCodec" or re_search(r"(?:^|\s)\d+\.\d+$", cur_stripped)):
+                    if cur_stripped and (
+                        key != "audioCodec"
+                        or re_search(r"(?:^|\s)\d+\.\d+$", cur_stripped)
+                    ):
                         continue
                 elif cur is not None:
                     continue
@@ -2162,6 +2168,7 @@ class P115StrmHelper(_PluginBase):
         ct_db_manager.close_database()
         U115Patcher().disable()
         P115DiskPatcher().disable()
+        AppVerPatcher().disable()
         UploadNotifyAggregator.shutdown()
 
     async def _save_config_api(self, request: Request) -> Dict:

@@ -422,6 +422,7 @@ const config = reactive({
   directory_upload_path: [],
   directory_upload_clouddrive2_config: { enabled: false, prefix: '' },
   tg_search_channels: [],
+  hdhive_search_enabled: false,
   hdhive_checkin_username: '',
   hdhive_checkin_password: '',
   hdhive_checkin_daily_enabled: false,
@@ -1847,6 +1848,13 @@ provide('machineId', machineId);
 
   .config-actions {
     flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .config-actions :deep(.v-btn) {
+    min-width: 96px !important;
+    flex: 0 0 96px;
+    white-space: nowrap;
   }
 
   .config-actions-spacer {

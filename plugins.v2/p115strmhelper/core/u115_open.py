@@ -80,7 +80,7 @@ class U115OpenHelper:
 
         self.fail_upload_count = 0
 
-        self.p115_center = P115Center(configer.get_config("MACHINE_ID"))
+        self.p115_center = P115Center(configer.get_config("machine_id"))
         self.databasehelper = FileDbHelper()
         self.cookie_client = create_client(
             configer.cookies,
@@ -351,6 +351,12 @@ class U115OpenHelper:
         """
 
         def encode_callback(cb: str) -> str:
+            """
+            对回调字符串进行 Base64 编码
+
+            :param cb: 待编码的回调字符串
+            :return: Base64 编码后的字符串
+            """
             return b64encode_as_string(cb)
 
         def send_upload_info(

@@ -155,6 +155,7 @@ class ExportDirWatchdogTest(unittest.TestCase):
                 if value:
                     yield escape(value) if escape else value
 
+        p115client_tool_export_dir.export_dir_parse_iter_path = fake_parse_iter
         p115client_tool_export_dir.parse_export_dir_as_path_iter = fake_parse_iter
         self._set_module("p115client.tool", p115client_tool)
         self._set_module("p115client.tool.export_dir", p115client_tool_export_dir)
@@ -238,6 +239,7 @@ class ExportDirWatchdogTest(unittest.TestCase):
         client = _FakeClient()
         response = _FakeResponse("Root\nRoot/Movie.mkv\n")
         stream = _FakeStream(response)
+        export_calls = []
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             params = {
@@ -262,7 +264,7 @@ class ExportDirWatchdogTest(unittest.TestCase):
                 result_queue,
                 client_factory=lambda *args, **kwargs: client,
                 get_pid_func=lambda **kwargs: 88,
-                export_dir_func=lambda *args, **kwargs: 99,
+                export_dir_func=lambda *args, **kwargs: export_calls.append((args, kwargs)) or 99,
                 parse_iter_func=lambda lines, escape=None: (line.rstrip("\n") for line in lines),
                 stream_factory=stream,
             )
@@ -273,6 +275,10 @@ class ExportDirWatchdogTest(unittest.TestCase):
         self.assertEqual(output, ["Root", "Root/Movie.mkv"])
         self.assertEqual(client.deleted, ["file-1"])
         self.assertTrue(stream.calls)
+        self.assertEqual(export_calls[0][1]["file_ids"], 88)
+        self.assertEqual(export_calls[0][1]["target"], 0)
+        self.assertNotIn("export_file_ids", export_calls[0][1])
+        self.assertNotIn("target_pid", export_calls[0][1])
 
     def test_log_context_includes_required_fields(self):
         context = self._context()

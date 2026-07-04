@@ -267,7 +267,12 @@ class FullSyncStrmHelper:
 
                         new_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        strm_url = f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url?apikey={settings.API_TOKEN}&name={item['FileName']}&size={item['Size']}&md5={item['Etag']}&s3_key_flag={item['S3KeyFlag']}"
+                        strm_url = (
+                            f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url"
+                            f"?apikey={settings.API_TOKEN}&name={item['FileName']}"
+                            f"&size={item['Size']}&md5={item['Etag']}"
+                            f"&s3_key_flag={item['S3KeyFlag']}"
+                        )
 
                         with open(new_file_path, "w", encoding="utf-8") as file:
                             file.write(strm_url)
@@ -417,7 +422,12 @@ class ShareStrmHelper:
 
                 new_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                strm_url = f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url?apikey={settings.API_TOKEN}&name={item['FileName']}&size={item['Size']}&md5={item['Etag']}&s3_key_flag={item['S3KeyFlag']}"
+                strm_url = (
+                    f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url"
+                    f"?apikey={settings.API_TOKEN}&name={item['FileName']}"
+                    f"&size={item['Size']}&md5={item['Etag']}"
+                    f"&s3_key_flag={item['S3KeyFlag']}"
+                )
 
                 with open(new_file_path, "w", encoding="utf-8") as file:
                     file.write(strm_url)
@@ -456,6 +466,10 @@ class ShareStrmHelper:
 
 
 class P123StrmHelper(_PluginBase):
+    """
+    123 云盘 STRM 助手：生成 STRM、监控整理入库、分享生成 STRM、空间清理一条龙服务
+    """
+
     # 插件名称
     plugin_name = "123云盘STRM助手"
     # 插件描述
@@ -463,7 +477,7 @@ class P123StrmHelper(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/DDSRem-Dev/MoviePilot-Plugins/main/icons/P123Disk.png"
     # 插件版本
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -604,6 +618,11 @@ class P123StrmHelper(_PluginBase):
                 self._scheduler.start()
 
     def get_state(self) -> bool:
+        """
+        返回插件启用状态
+
+        :return: True 表示插件已启用
+        """
         return self._enabled
 
     @property
@@ -639,6 +658,11 @@ class P123StrmHelper(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
+        """
+        返回插件远程命令列表，本插件无远程命令
+
+        :return: None
+        """
         pass
 
     def get_api(self) -> List[Dict[str, Any]]:
@@ -1429,6 +1453,11 @@ class P123StrmHelper(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
+        """
+        返回插件数据页面配置，本插件无数据页面
+
+        :return: None
+        """
         pass
 
     def __update_config(self):
@@ -1767,7 +1796,12 @@ class P123StrmHelper(_PluginBase):
             )
             return
 
-        strm_url = f"{self.moviepilot_address.rstrip('/')}/api/v1/plugin/P123StrmHelper/redirect_url?apikey={settings.API_TOKEN}&name={item_dest_info['FileName']}&size={item_dest_info['Size']}&md5={item_dest_info['Etag']}&s3_key_flag={item_dest_info['S3KeyFlag']}"
+        strm_url = (
+            f"{self.moviepilot_address.rstrip('/')}/api/v1/plugin/P123StrmHelper/redirect_url"
+            f"?apikey={settings.API_TOKEN}&name={item_dest_info['FileName']}"
+            f"&size={item_dest_info['Size']}&md5={item_dest_info['Etag']}"
+            f"&s3_key_flag={item_dest_info['S3KeyFlag']}"
+        )
 
         status, strm_target_path = generate_strm_files(
             target_dir=local_media_dir,

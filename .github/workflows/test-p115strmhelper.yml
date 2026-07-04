@@ -17,6 +17,8 @@ on:
       - 'plugins.v2/p115strmhelper/utils/url.py'
       # utils (test_webhook_utils.py)
       - 'plugins.v2/p115strmhelper/utils/webhook.py'
+      # utils (test_tree.py)
+      - 'plugins.v2/p115strmhelper/utils/tree.py'
       - 'plugins.v2/p115strmhelper/tests/**'
       - '.github/workflows/test-p115strmhelper.yml'
   pull_request:
@@ -35,6 +37,8 @@ on:
       - 'plugins.v2/p115strmhelper/utils/url.py'
       # utils (test_webhook_utils.py)
       - 'plugins.v2/p115strmhelper/utils/webhook.py'
+      # utils (test_tree.py)
+      - 'plugins.v2/p115strmhelper/utils/tree.py'
       - 'plugins.v2/p115strmhelper/tests/**'
       - '.github/workflows/test-p115strmhelper.yml'
   workflow_dispatch:
@@ -48,16 +52,16 @@ jobs:
 
     steps:
       - name: Checkout plugin code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Checkout MoviePilot
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: jxxghp/MoviePilot
           path: MoviePilot
 
       - name: Checkout MoviePilot resources
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: jxxghp/MoviePilot-Resources
           path: MoviePilot-Resources
@@ -79,6 +83,25 @@ jobs:
         run: |
           pip install -r MoviePilot/requirements.txt
           pip install --find-links plugins.v2/p115strmhelper/wheels -r plugins.v2/p115strmhelper/requirements.txt
+
+      - name: Start Redis (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+          sudo service redis-server start
+          redis-cli ping
+
+      - name: Start Redis (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install memurai-developer -y --no-progress
+          $svc = Get-Service Memurai -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -ne 'Running') {
+            Start-Service Memurai
+          }
+          Get-Service Memurai
+        shell: powershell
 
       - name: Run tests
         working-directory: plugins.v2/p115strmhelper
