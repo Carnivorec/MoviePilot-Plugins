@@ -38,6 +38,7 @@ DEFAULT_EXPORT_DIR_WATCHDOG_TIMEOUT_SECONDS = 1800.0
 DEFAULT_EXPORT_DIR_WAIT_LOG_INTERVAL_SECONDS = 60.0
 DEFAULT_EXPORT_DIR_LOCK_POLL_SECONDS = 1.0
 DEFAULT_EXPORT_DIR_TERMINATE_GRACE_SECONDS = 10.0
+DEFAULT_EXPORT_DIR_OUTPUT_MAX_AGE_SECONDS = 24 * 60 * 60.0
 DEFAULT_DOWNLOAD_TIMEOUT = {
     "connect": 30.0,
     "pool": 15.0,
@@ -334,6 +335,131 @@ def iter_export_dir_items(output_path: Path) -> Iterator[str]:
         for line in file:
             if line.strip():
                 yield json.loads(line)
+
+
+def remove_export_dir_output(output_path: Path) -> bool:
+    """
+    删除单次目录树导出的本地 JSONL 中间文件
+
+    :param output_path: JSONL 结果路径
+    :return: 是否删除了文件
+    """
+    path = Path(output_path)
+    # /*
+    #  * ========
+    #  * 步骤1：校验本地清理目标
+    #  * 目标：只允许清理 watchdog 生成的 JSONL 中间文件
+    #  * 数据源：run_export_dir_with_watchdog 返回的 output_path
+    #  * 操作要点：
+    #  * 1) 拒绝非 .jsonl 路径，避免误删其他文件。
+    #  * 2) 记录开始和结束日志，便于追踪每次清理结果。
+    #  * ========
+    #  */
+    logger.info(f"【增量STRM生成】【目录树导出】开始清理本地目录树导出文件: {path}")
+    if path.suffix != ".jsonl":
+        logger.warning(f"【增量STRM生成】【目录树导出】跳过非 JSONL 本地中间文件清理: {path}")
+        logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=False")
+        return False
+    try:
+        # // 1.1 删除单次导出结果文件
+        path.unlink()
+        logger.info(f"【增量STRM生成】【目录树导出】清理本地目录树导出文件完成: {path}")
+        logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=True")
+        return True
+    except FileNotFoundError:
+        logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=False")
+        return False
+    except Exception as exc:
+        logger.warning(
+            f"【增量STRM生成】【目录树导出】清理本地目录树导出文件失败: {path} "
+            f"exception_type={type(exc).__name__} exception={exc}"
+        )
+        logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=False")
+        return False
+
+
+def cleanup_export_dir_watchdog_outputs(
+    output_dir: Path,
+    *,
+    max_age_seconds: float = DEFAULT_EXPORT_DIR_OUTPUT_MAX_AGE_SECONDS,
+    keep_path: Optional[Path] = None,
+) -> int:
+    """
+    清理 export_dir_watchdog 目录中过期的 JSONL 中间文件
+
+    :param output_dir: export_dir_watchdog 输出目录
+    :param max_age_seconds: 文件保留秒数
+    :param keep_path: 需要跳过清理的当前输出路径
+    :return: 已删除文件数量
+    """
+    directory = Path(output_dir)
+    # /*
+    #  * ========
+    #  * 步骤1：扫描 watchdog 输出目录
+    #  * 目标：清理异常中断遗留的过期 JSONL，防止临时目录持续膨胀
+    #  * 数据源：plugin_temp_path/export_dir_watchdog
+    #  * 操作要点：
+    #  * 1) 只遍历 .jsonl 文件。
+    #  * 2) 默认保留 24 小时内文件，当前输出文件可通过 keep_path 保护。
+    #  * ========
+    #  */
+    logger.info(
+        f"【增量STRM生成】【目录树导出】开始清理过期本地目录树导出文件: "
+        f"output_dir={directory} max_age_seconds={max_age_seconds}"
+    )
+    if not directory.exists():
+        logger.info(
+            f"【增量STRM生成】【目录树导出】结束清理过期本地目录树导出文件: "
+            f"output_dir={directory} removed_count=0"
+        )
+        return 0
+    if not directory.is_dir():
+        logger.warning(f"【增量STRM生成】【目录树导出】本地目录树导出路径不是目录，跳过清理: {directory}")
+        logger.info(
+            f"【增量STRM生成】【目录树导出】结束清理过期本地目录树导出文件: "
+            f"output_dir={directory} removed_count=0"
+        )
+        return 0
+
+    removed_count = 0
+    now = time.time()
+    max_age = _to_positive_float(max_age_seconds) or DEFAULT_EXPORT_DIR_OUTPUT_MAX_AGE_SECONDS
+    keep_resolved: Optional[Path] = None
+    if keep_path is not None:
+        try:
+            keep_resolved = Path(keep_path).resolve()
+        except Exception:
+            keep_resolved = Path(keep_path)
+
+    for path in directory.glob("*.jsonl"):
+        try:
+            # // 1.1 跳过当前请求正在写入或即将读取的输出文件
+            if keep_resolved is not None and path.resolve() == keep_resolved:
+                continue
+            # // 1.2 保留未过期文件，便于短时间内排查最近一次导出结果
+            if now - path.stat().st_mtime < max_age:
+                continue
+            # // 1.3 删除已过期 JSONL 中间文件
+            if remove_export_dir_output(path):
+                removed_count += 1
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            logger.warning(
+                f"【增量STRM生成】【目录树导出】清理过期本地目录树导出文件失败: {path} "
+                f"exception_type={type(exc).__name__} exception={exc}"
+            )
+
+    if removed_count:
+        logger.info(
+            f"【增量STRM生成】【目录树导出】过期本地目录树导出文件清理完成: "
+            f"output_dir={directory} removed_count={removed_count} max_age_seconds={max_age:.0f}"
+        )
+    logger.info(
+        f"【增量STRM生成】【目录树导出】结束清理过期本地目录树导出文件: "
+        f"output_dir={directory} removed_count={removed_count}"
+    )
+    return removed_count
 
 
 
@@ -675,6 +801,7 @@ def build_export_dir_watchdog_params(
     )
     output_dir = plugin_temp_path / "export_dir_watchdog"
     output_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_export_dir_watchdog_outputs(output_dir)
     return {
         "request_id": request_id,
         "pan_path": pan_path,

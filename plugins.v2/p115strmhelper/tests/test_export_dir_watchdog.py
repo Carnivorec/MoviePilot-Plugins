@@ -280,6 +280,43 @@ class ExportDirWatchdogTest(unittest.TestCase):
         self.assertNotIn("export_file_ids", export_calls[0][1])
         self.assertNotIn("target_pid", export_calls[0][1])
 
+    def test_remove_export_dir_output_deletes_local_jsonl_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "req-local.jsonl"
+            output_path.write_text('"/Movie.mkv"\n', encoding="utf-8")
+
+            removed = self.module.remove_export_dir_output(output_path)
+
+            self.assertTrue(removed)
+            self.assertFalse(output_path.exists())
+
+    def test_cleanup_export_dir_watchdog_outputs_removes_only_expired_jsonl(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            old_jsonl = output_dir / "old.jsonl"
+            fresh_jsonl = output_dir / "fresh.jsonl"
+            keep_jsonl = output_dir / "keep.jsonl"
+            old_text = output_dir / "old.txt"
+            for path in (old_jsonl, fresh_jsonl, keep_jsonl, old_text):
+                path.write_text("data", encoding="utf-8")
+
+            now = time.time()
+            old_mtime = now - 3600
+            os.utime(old_jsonl, (old_mtime, old_mtime))
+            os.utime(old_text, (old_mtime, old_mtime))
+
+            removed = self.module.cleanup_export_dir_watchdog_outputs(
+                output_dir,
+                max_age_seconds=60,
+                keep_path=keep_jsonl,
+            )
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(old_jsonl.exists())
+            self.assertTrue(fresh_jsonl.exists())
+            self.assertTrue(keep_jsonl.exists())
+            self.assertTrue(old_text.exists())
+
     def test_log_context_includes_required_fields(self):
         context = self._context()
         context.log("download_stream_start", timeout="1s")

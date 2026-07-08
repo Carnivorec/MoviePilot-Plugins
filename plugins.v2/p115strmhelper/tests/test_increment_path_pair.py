@@ -105,6 +105,24 @@ class TestIncrementSourceGuard(unittest.TestCase):
         self.assertNotIn("compare_trees_lines", source)
         self.assertNotIn("get_path_by_line_number(line)", source)
 
+    def test_increment_generation_cleans_watchdog_output_after_iteration(self):
+        increment_path = (
+            Path(__file__).resolve().parents[1]
+            / "helper"
+            / "strm"
+            / "increment.py"
+        )
+        source = increment_path.read_text(encoding="utf-8")
+
+        self.assertIn("remove_export_dir_output", source)
+        itertree_offset = source.index("def __itertree")
+        finally_offset = source.index("finally:", itertree_offset)
+        cleanup_offset = source.index(
+            "remove_export_dir_output(output_path)",
+            finally_offset,
+        )
+        self.assertLess(finally_offset, cleanup_offset)
+
 
 if __name__ == "__main__":
     unittest.main()

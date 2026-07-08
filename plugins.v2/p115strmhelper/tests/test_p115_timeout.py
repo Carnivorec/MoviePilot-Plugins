@@ -171,7 +171,7 @@ class TestP115StaticTimeoutCoverage(TestCase):
         self.assertIn("apply_p115_request_timeout(kwargs, timeout=request_timeout)", source)
 
 
-class TestAppVerPatcherCompatibility(TestCase):
+class TestAppVerAndDownloadAppPatchers(TestCase):
     def setUp(self):
         self._saved_modules = {
             name: sys.modules.get(name)
@@ -180,13 +180,12 @@ class TestAppVerPatcherCompatibility(TestCase):
                 "app.log",
                 "p115client",
                 "p115client.client",
-                "p115client.util",
-                "p115cipher",
                 "fake_p115_plugin",
                 "fake_p115_plugin.patch",
                 "fake_p115_plugin.utils",
                 "fake_p115_plugin.utils.user_agent",
                 "fake_p115_plugin.patch.app_ver",
+                "fake_p115_plugin.patch.download_app",
             ]
         }
 
@@ -197,35 +196,18 @@ class TestAppVerPatcherCompatibility(TestCase):
         )
 
         class FakeP115Client:
-            user_id = "1"
-            user_key = "key"
+            def download_folders_app(self, payload, app="web", **kwargs):
+                return {"method": "folders", "payload": payload, "app": app, "kwargs": kwargs}
 
-            def request(self, **kwargs):
-                return kwargs
-
-            def upload_init(self, payload, **kwargs):
-                return payload, kwargs
-
-        def fake_get_request(*args, **kwargs):
-            return (lambda **request_kwargs: {"ok": True}), {
-                "params": {"app_ver": "99.99.99.99"}
-            }
+            def download_files_app(self, payload, app="web", **kwargs):
+                return {"method": "files", "payload": payload, "app": app, "kwargs": kwargs}
 
         fake_p115client = ModuleType("p115client")
         fake_p115client.P115Client = FakeP115Client
 
         fake_p115client_client = ModuleType("p115client.client")
-        fake_p115client_client.get_request = fake_get_request
-
-        fake_p115client_util = ModuleType("p115client.util")
-        fake_p115client_util.complete_url = lambda path, base_url=None: f"{base_url}{path}"
-
-        fake_p115cipher = ModuleType("p115cipher")
-        fake_p115cipher.rsa_encrypt = lambda value: value
-        fake_p115cipher.rsa_decrypt = lambda value: value
-        fake_p115cipher.ecdh_aes_encrypt = lambda value: value
-        fake_p115cipher.ecdh_aes_decrypt = lambda value: value
-        fake_p115cipher.make_upload_payload = lambda payload: {"data": payload}
+        fake_p115client_client.P115Client = FakeP115Client
+        fake_p115client_client._app_version = "36.2.28"
 
         fake_app = ModuleType("app")
         fake_app_log = ModuleType("app.log")
@@ -248,8 +230,6 @@ class TestAppVerPatcherCompatibility(TestCase):
                 "app.log": fake_app_log,
                 "p115client": fake_p115client,
                 "p115client.client": fake_p115client_client,
-                "p115client.util": fake_p115client_util,
-                "p115cipher": fake_p115cipher,
                 "fake_p115_plugin": fake_pkg,
                 "fake_p115_plugin.patch": fake_patch_pkg,
                 "fake_p115_plugin.utils": fake_utils_pkg,
@@ -264,158 +244,107 @@ class TestAppVerPatcherCompatibility(TestCase):
             else:
                 sys.modules[name] = module
 
-    def _load_app_ver_module(self):
-        module_path = Path(__file__).resolve().parents[1] / "patch" / "app_ver.py"
-        spec = importlib.util.spec_from_file_location(
-            "fake_p115_plugin.patch.app_ver", module_path
-        )
+    def _load_patch_module(self, filename, module_name):
+        module_path = Path(__file__).resolve().parents[1] / "patch" / filename
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules["fake_p115_plugin.patch.app_ver"] = module
+        sys.modules[module_name] = module
         spec.loader.exec_module(module)
         return module
 
-    def test_enable_skips_missing_lixianssp_method_without_failing_reload(self):
+    def _load_app_ver_module(self):
+        return self._load_patch_module(
+            "app_ver.py",
+            "fake_p115_plugin.patch.app_ver",
+        )
+
+    def _load_download_app_module(self):
+        return self._load_patch_module(
+            "download_app.py",
+            "fake_p115_plugin.patch.download_app",
+        )
+
+    def test_app_ver_patcher_replaces_and_restores_module_app_version(self):
         module = self._load_app_ver_module()
+        client_mod = sys.modules["p115client.client"]
 
         module.AppVerPatcher.enable()
 
         self.assertTrue(module.AppVerPatcher._active)
-        self.assertTrue(
-            any("_clouddownload_lixianssp_request" in msg for msg in self.warning_messages)
-        )
-        module.AppVerPatcher.disable()
-
-    def test_disable_restores_stale_get_request_when_previous_enable_failed(self):
-        module = self._load_app_ver_module()
-        client_mod = sys.modules["p115client.client"]
-        original = client_mod.get_request
-
-        @wraps(original)
-        def stale_patched(*args, **kwargs):
-            return lambda **request_kwargs: {"broken": True}
-
-        setattr(stale_patched, module._MARKER, True)
-        client_mod.get_request = stale_patched
+        self.assertEqual(client_mod._app_version, "35.9.0")
+        self.assertNotEqual(client_mod._app_version, "99.99.99.99")
 
         module.AppVerPatcher.disable()
 
-        self.assertIs(client_mod.get_request, original)
+        self.assertFalse(module.AppVerPatcher._active)
+        self.assertEqual(client_mod._app_version, "36.2.28")
 
-    def test_enable_rewraps_stale_get_request_from_previous_module(self):
+    def test_app_ver_patcher_skips_missing_module_app_version(self):
         module = self._load_app_ver_module()
         client_mod = sys.modules["p115client.client"]
-        original = client_mod.get_request
-
-        @wraps(original)
-        def stale_patched(*args, **kwargs):
-            return lambda **request_kwargs: {"broken": True}
-
-        setattr(stale_patched, module._MARKER, True)
-        client_mod.get_request = stale_patched
+        delattr(client_mod, "_app_version")
 
         module.AppVerPatcher.enable()
-        request, request_kwargs = client_mod.get_request(
-            "https://example.test", params={}
+
+        self.assertFalse(module.AppVerPatcher._active)
+        self.assertTrue(any("_app_version" in msg for msg in self.warning_messages))
+
+    def test_download_app_patcher_forces_chrome_and_preserves_kwargs(self):
+        module = self._load_download_app_module()
+        client_cls = sys.modules["p115client.client"].P115Client
+        client = client_cls()
+        timeout_extensions = {"timeout": {"connect": 1, "read": 2}}
+
+        module.DownloadAppPatcher.enable()
+
+        folder_result = client.download_folders_app(
+            {"pickcode": "folder"},
+            "android",
+            extensions=timeout_extensions,
+            timeout=2,
+            trace_id="keep-folder",
+        )
+        file_result = client.download_files_app(
+            {"pickcode": "file"},
+            app="windows",
+            extensions=timeout_extensions,
+            timeout=2,
+            trace_id="keep-file",
         )
 
-        self.assertIs(request, object().__class__ if False else request)
-        self.assertIs(client_mod.get_request.__wrapped__, original)
-        self.assertEqual(request_kwargs["params"]["app_ver"], "35.9.0")
-        module.AppVerPatcher.disable()
+        self.assertEqual(folder_result["app"], "chrome")
+        self.assertEqual(file_result["app"], "chrome")
+        self.assertIs(folder_result["kwargs"]["extensions"], timeout_extensions)
+        self.assertIs(file_result["kwargs"]["extensions"], timeout_extensions)
+        self.assertEqual(folder_result["kwargs"]["timeout"], 2)
+        self.assertEqual(file_result["kwargs"]["trace_id"], "keep-file")
 
-    def test_enable_recursively_unwraps_nested_stale_get_request_wrappers(self):
-        module = self._load_app_ver_module()
-        client_mod = sys.modules["p115client.client"]
-        original = client_mod.get_request
+        module.DownloadAppPatcher.disable()
 
-        @wraps(original)
-        def stale_inner(*args, **kwargs):
-            return lambda **request_kwargs: {"broken": "inner"}
+    def test_download_app_patcher_disable_restores_original_methods(self):
+        module = self._load_download_app_module()
+        client_cls = sys.modules["p115client.client"].P115Client
+        original = client_cls.download_files_app
 
-        setattr(stale_inner, module._MARKER, True)
+        module.DownloadAppPatcher.enable()
+        self.assertIsNot(client_cls.download_files_app, original)
 
-        @wraps(stale_inner)
-        def stale_outer(*args, **kwargs):
-            return stale_inner(*args, **kwargs)
+        module.DownloadAppPatcher.disable()
+        self.assertIs(client_cls.download_files_app, original)
 
-        setattr(stale_outer, module._MARKER, True)
-        client_mod.get_request = stale_outer
+    def test_download_app_patcher_skips_missing_methods_without_import_failure(self):
+        module = self._load_download_app_module()
 
-        module.AppVerPatcher.enable()
-        request, request_kwargs = client_mod.get_request(
-            "https://example.test", params={}
-        )
+        class IncompleteClient:
+            def download_files_app(self, payload, app="web", **kwargs):
+                return {}
 
-        self.assertIs(client_mod.get_request.__wrapped__, original)
-        self.assertIsNotNone(request)
-        self.assertEqual(request_kwargs["params"]["app_ver"], "35.9.0")
-        module.AppVerPatcher.disable()
+        sys.modules["p115client.client"].P115Client = IncompleteClient
 
-    def test_enable_normalizes_callable_url_before_calling_original_get_request(self):
-        module = self._load_app_ver_module()
-        client_mod = sys.modules["p115client.client"]
+        module.DownloadAppPatcher.enable()
 
-        def strict_get_request(url, **kwargs):
-            if not isinstance(url, str):
-                raise TypeError("Constructor parameter should be str")
-            return (lambda **request_kwargs: {"ok": True}), {
-                "url": url,
-                "params": {"app_ver": "99.99.99.99"},
-            }
-
-        client_mod.get_request = strict_get_request
-
-        module.AppVerPatcher.enable()
-        _, request_kwargs = client_mod.get_request(lambda: "https://example.test")
-
-        self.assertEqual(request_kwargs["url"], "https://example.test")
-        self.assertEqual(request_kwargs["params"]["app_ver"], "35.9.0")
-        module.AppVerPatcher.disable()
-
-    def test_enable_unwraps_unmarked_broken_get_request_wrapper_by_shape(self):
-        module = self._load_app_ver_module()
-        client_mod = sys.modules["p115client.client"]
-        original = client_mod.get_request
-
-        @wraps(original)
-        def unmarked_broken_wrapper(*args, **kwargs):
-            return lambda **request_kwargs: {"broken": True}
-
-        client_mod.get_request = unmarked_broken_wrapper
-
-        module.AppVerPatcher.enable()
-        request, request_kwargs = client_mod.get_request(
-            "https://example.test", params={}
-        )
-
-        self.assertIs(client_mod.get_request.__wrapped__, original)
-        self.assertIsNotNone(request)
-        self.assertEqual(request_kwargs["params"]["app_ver"], "35.9.0")
-        module.AppVerPatcher.disable()
-
-    def test_enable_reloads_get_request_when_stale_wrapper_has_no_original(self):
-        module = self._load_app_ver_module()
-        client_mod = sys.modules["p115client.client"]
-        original = client_mod.get_request
-
-        def stale_patched(*args, **kwargs):
-            return lambda **request_kwargs: {"broken": True}
-
-        setattr(stale_patched, module._MARKER, True)
-        client_mod.get_request = stale_patched
-
-        module.AppVerPatcher.enable()
-        request, request_kwargs = client_mod.get_request(
-            "https://example.test", params={}
-        )
-
-        self.assertIsNot(client_mod.get_request.__wrapped__, original)
-        self.assertIn(
-            "compatible_get_request", client_mod.get_request.__wrapped__.__qualname__
-        )
-        self.assertIsNotNone(request)
-        self.assertEqual(request_kwargs["params"]["app_ver"], "35.9.0")
-        module.AppVerPatcher.disable()
+        self.assertFalse(module.DownloadAppPatcher._active)
+        self.assertTrue(any("download_folders_app" in msg for msg in self.warning_messages))
 
 
 class TestP115DiskTimeoutWrapper(TestCase):
@@ -501,15 +430,19 @@ class TestUserAgentTimeout(TestCase):
         fake_cache = ModuleType("app.core.cache")
         fake_cache.cached = lambda *args, **kwargs: (lambda func: func)
 
+        fake_logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
         fake_app = ModuleType("app")
+        fake_app_log = ModuleType("app.log")
+        fake_app_log.logger = fake_logger
         fake_core = ModuleType("app.core")
 
         self._saved_modules = {
             name: sys.modules.get(name)
-            for name in ["p115client", "app", "app.core", "app.core.cache", "utils.user_agent"]
+            for name in ["p115client", "app", "app.log", "app.core", "app.core.cache", "utils.user_agent"]
         }
         sys.modules["p115client"] = fake_p115client
         sys.modules["app"] = fake_app
+        sys.modules["app.log"] = fake_app_log
         sys.modules["app.core"] = fake_core
         sys.modules["app.core.cache"] = fake_cache
         sys.modules.pop("utils.user_agent", None)
@@ -520,6 +453,20 @@ class TestUserAgentTimeout(TestCase):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = module
+
+    def test_get_real_app_ver_passes_timeout_to_app_version_request(self):
+        user_agent = importlib.import_module("utils.user_agent")
+
+        version = user_agent.UserAgentUtils.get_real_app_ver()
+
+        self.assertEqual(version, "37.0.8")
+        self.assertEqual(len(self.calls), 1)
+        kwargs = self.calls[0]
+        self.assertEqual(kwargs["timeout"], 10.0)
+        self.assertEqual(
+            kwargs["extensions"]["timeout"],
+            {"connect": 10.0, "read": 10.0, "write": 10.0, "pool": 10.0},
+        )
 
     def test_generate_u115_ios_passes_timeout_to_app_version_request(self):
         user_agent = importlib.import_module("utils.user_agent")

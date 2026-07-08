@@ -23,6 +23,7 @@ from ...helper.mediainfo_download import MediaInfoDownloader
 from ...helper.mediaserver import MediaServerRefresh, emby_mediainfo_queue
 from ...helper.strm.export_dir_watchdog import (
     iter_export_dir_items,
+    remove_export_dir_output,
     run_export_dir_with_watchdog,
 )
 from ...utils.automaton import AutomatonUtils
@@ -191,43 +192,66 @@ class IncrementSyncStrmHelper:
         )
         self.api_count += 4
 
-        items_iterator = iter_export_dir_items(output_path)
+        # /*
+        #  * ========
+        #  * 步骤1：读取并消费 watchdog 本地 JSONL
+        #  * 目标：把子进程导出的目录树转换成本地目标路径与 115 源路径映射
+        #  * 数据源：run_export_dir_with_watchdog 生成的 output_path
+        #  * 操作要点：
+        #  * 1) 逐行读取 JSONL，避免一次性加载整棵目录树。
+        #  * 2) 只产出叶子文件路径，跳过目录项。
+        #  * 3) finally 中删除本地 JSONL，避免临时目录持续占用空间。
+        #  * ========
+        #  */
+        logger.info(f"【增量STRM生成】开始读取本地目录树导出文件: {output_path}")
         try:
-            next(items_iterator)
-            relative_path = next(items_iterator)
-        except StopIteration:
-            return
+            # // 1.1 打开 watchdog 输出迭代器
+            items_iterator = iter_export_dir_items(output_path)
+            try:
+                # // 1.2 跳过导出根路径，并记录当前同步根路径
+                next(items_iterator)
+                relative_path = next(items_iterator)
+            except StopIteration:
+                return
 
-        def process_file_item(item_str: str):
-            item_path = Path(pan_path) / Path(item_str).relative_to(relative_path)
-            relative_item_path = item_path.relative_to(pan_path)
-            local_item_path = Path(local_path) / PathUtils.sanitize_path_parts(
-                relative_item_path
-            )
-
-            if item_path.suffix.lower() in self.rmt_mediaext:
-                strm_filename = StrmGenerater.get_strm_filename(local_item_path)
-                yield (
-                    (local_item_path.parent / strm_filename).as_posix(),
-                    item_path.as_posix(),
-                )
-            elif (
-                item_path.suffix.lower() in self.download_mediaext
-                and self.auto_download_mediainfo
-            ):
-                yield (
-                    local_item_path.as_posix(),
-                    item_path.as_posix(),
+            def process_file_item(item_str: str):
+                # // 1.3 将网盘路径转换为本地目标路径
+                item_path = Path(pan_path) / Path(item_str).relative_to(relative_path)
+                relative_item_path = item_path.relative_to(pan_path)
+                local_item_path = Path(local_path) / PathUtils.sanitize_path_parts(
+                    relative_item_path
                 )
 
-        previous_item = None
-        for current_item in items_iterator:
+                if item_path.suffix.lower() in self.rmt_mediaext:
+                    # // 1.4 媒体文件产出 STRM 目标路径
+                    strm_filename = StrmGenerater.get_strm_filename(local_item_path)
+                    yield (
+                        (local_item_path.parent / strm_filename).as_posix(),
+                        item_path.as_posix(),
+                    )
+                elif (
+                    item_path.suffix.lower() in self.download_mediaext
+                    and self.auto_download_mediainfo
+                ):
+                    # // 1.5 字幕和媒体信息文件产出原始本地目标路径
+                    yield (
+                        local_item_path.as_posix(),
+                        item_path.as_posix(),
+                    )
+
+            previous_item = None
+            for current_item in items_iterator:
+                # // 1.6 用前后路径关系判断 previous_item 是否为叶子文件
+                if previous_item is not None:
+                    if not current_item.startswith(previous_item + "/"):
+                        yield from process_file_item(previous_item)
+                previous_item = current_item
             if previous_item is not None:
-                if not current_item.startswith(previous_item + "/"):
-                    yield from process_file_item(previous_item)
-            previous_item = current_item
-        if previous_item is not None:
-            yield from process_file_item(previous_item)
+                yield from process_file_item(previous_item)
+        finally:
+            # // 1.7 删除本轮已消费的本地 JSONL 中间文件
+            remove_export_dir_output(output_path)
+            logger.info(f"【增量STRM生成】结束读取本地目录树导出文件: {output_path}")
 
     def __iterdir(self, cid: int, path: str) -> Iterator:
         """
