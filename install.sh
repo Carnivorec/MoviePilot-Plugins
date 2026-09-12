@@ -578,6 +578,11 @@ stage_repo() {
         test -f "$tmp/package.v2.json"
         test -f "$tmp/plugins.v2/p115strmhelper/__init__.py"
         test -f "$tmp/plugins.v2/p115disk/__init__.py"
+        jq "{P115Disk: .P115Disk, P115StrmHelper: .P115StrmHelper}" \
+          "$tmp/package.v2.json" > "$tmp/package.v2.json.filtered"
+        jq -e "all(.[]; type == \"object\" and (.version | type == \"string\"))" \
+          "$tmp/package.v2.json.filtered" >/dev/null
+        mv "$tmp/package.v2.json.filtered" "$tmp/package.v2.json"
         rm -rf "$CONTAINER_REPO_PATH"
         mv "$tmp" "$CONTAINER_REPO_PATH"
       '
