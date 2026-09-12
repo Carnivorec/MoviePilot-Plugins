@@ -27,7 +27,6 @@ from app.log import logger
 from ._sqlitedict import SqliteTableDict
 from ...core.config import configer
 from ...utils.time import TimeUtils
-from ...utils.p115_timeout import build_p115_request_kwargs
 
 
 class WebdavCore:
@@ -146,6 +145,7 @@ class WebdavCore:
                 escape=None,
                 normalize_attr=normalize_attr_simple,
                 async_=True,
+                max_workers=0,
                 **configer.get_ios_ua_app(app=False),
             ):
                 self.cache_attr.pop(attr["id"], None)
@@ -195,11 +195,7 @@ class WebdavCore:
                 logger.debug(f"cached url for id {id}: {url}")
                 return url
         resp = await self.client.download_url_app(
-            pickcode,
-            app="android",
-            headers={"user-agent": user_agent},
-            async_=True,
-            **build_p115_request_kwargs(),
+            pickcode, app="android", headers={"user-agent": user_agent}, async_=True
         )
         if not resp["state"]:
             if resp.get("error") == "文件上传不完整":

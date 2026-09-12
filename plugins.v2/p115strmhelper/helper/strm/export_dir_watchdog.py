@@ -345,23 +345,12 @@ def remove_export_dir_output(output_path: Path) -> bool:
     :return: 是否删除了文件
     """
     path = Path(output_path)
-    # /*
-    #  * ========
-    #  * 步骤1：校验本地清理目标
-    #  * 目标：只允许清理 watchdog 生成的 JSONL 中间文件
-    #  * 数据源：run_export_dir_with_watchdog 返回的 output_path
-    #  * 操作要点：
-    #  * 1) 拒绝非 .jsonl 路径，避免误删其他文件。
-    #  * 2) 记录开始和结束日志，便于追踪每次清理结果。
-    #  * ========
-    #  */
     logger.info(f"【增量STRM生成】【目录树导出】开始清理本地目录树导出文件: {path}")
     if path.suffix != ".jsonl":
         logger.warning(f"【增量STRM生成】【目录树导出】跳过非 JSONL 本地中间文件清理: {path}")
         logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=False")
         return False
     try:
-        # // 1.1 删除单次导出结果文件
         path.unlink()
         logger.info(f"【增量STRM生成】【目录树导出】清理本地目录树导出文件完成: {path}")
         logger.info(f"【增量STRM生成】【目录树导出】结束清理本地目录树导出文件: {path} removed=True")
@@ -393,16 +382,6 @@ def cleanup_export_dir_watchdog_outputs(
     :return: 已删除文件数量
     """
     directory = Path(output_dir)
-    # /*
-    #  * ========
-    #  * 步骤1：扫描 watchdog 输出目录
-    #  * 目标：清理异常中断遗留的过期 JSONL，防止临时目录持续膨胀
-    #  * 数据源：plugin_temp_path/export_dir_watchdog
-    #  * 操作要点：
-    #  * 1) 只遍历 .jsonl 文件。
-    #  * 2) 默认保留 24 小时内文件，当前输出文件可通过 keep_path 保护。
-    #  * ========
-    #  */
     logger.info(
         f"【增量STRM生成】【目录树导出】开始清理过期本地目录树导出文件: "
         f"output_dir={directory} max_age_seconds={max_age_seconds}"
@@ -433,13 +412,10 @@ def cleanup_export_dir_watchdog_outputs(
 
     for path in directory.glob("*.jsonl"):
         try:
-            # // 1.1 跳过当前请求正在写入或即将读取的输出文件
             if keep_resolved is not None and path.resolve() == keep_resolved:
                 continue
-            # // 1.2 保留未过期文件，便于短时间内排查最近一次导出结果
             if now - path.stat().st_mtime < max_age:
                 continue
-            # // 1.3 删除已过期 JSONL 中间文件
             if remove_export_dir_output(path):
                 removed_count += 1
         except FileNotFoundError:
@@ -594,7 +570,7 @@ def export_dir_worker_main(
             cid = get_pid_func(
                 client=client,
                 path=params["pan_path"],
-                mkdir=True,
+                mkdir=False,
                 update_cache=False,
                 by_cache=False,
                 request_timeout=10,
@@ -874,6 +850,10 @@ def run_export_dir_with_watchdog(
             "increment_sync_itertree_timeout_seconds 小于等于 0，使用 900 秒默认值",
             configured=status_timeout_config,
         )
-    result = run_worker_with_watchdog(params=params, context=context)
+    try:
+        result = run_worker_with_watchdog(params=params, context=context)
+    except BaseException:
+        remove_export_dir_output(Path(params["output_path"]))
+        raise
     context.log("worker_done", output_path=result["output_path"])
     return Path(result["output_path"])

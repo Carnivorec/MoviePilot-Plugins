@@ -58,6 +58,7 @@ VERIFY_ONLY=0
 CHECK_UPSTREAM=0
 ROLLBACK_MODE=""
 COPY_ONLY=0
+SKIP_FRONTEND_BUILD=0
 ALLOW_DIRTY=0
 ALLOW_NONFORK_VERSION=0
 FORCE=0
@@ -109,21 +110,22 @@ ICAgICAgICDlm57mu5rliLDmnIDov5HkuIDmrKHlpIfku70KICAtLWNvcHktb25seSAgICAgICAg
 ICAgICAgIOW6lOaApeebtOaOpeWkjeWItuWuieijhQogIC0tZm9yY2UgICAgICAgICAgICAgICAg
 ICAg5b+955Wl5Lu75Yqh6L+Q6KGM54q25oCB5qOA5p+lCiAgLS1hbGxvdy1kaXJ0eSAgICAgICAg
 ICAgICDlhYHorrggZ2l0IOW3peS9nOWMuuS4jeW5suWHgAogIC0tYWxsb3ctbm9uZm9yay12ZXJz
-aW9uICAg5YWB6K646Z2eIDk5LiDlvIDlpLTniYjmnKwKICAtaCwgLS1oZWxwICAgICAgICAgICAg
-ICAgIOaYvuekuuW4ruWKqQoK546v5aKD5Y+Y6YePOgogIElOU1RBTExfQ09ORklHX0ZJTEUgICAg
-ICAg5oyH5a6a6YWN572u5paH5Lu26Lev5b6ECiAgTVBfVVNFUk5BTUUgICAgICAgICAgICAgICBN
-b3ZpZVBpbG90IOeUqOaIt+WQjQogIE1QX1BBU1NXT1JEICAgICAgICAgICAgICAgTW92aWVQaWxv
-dCDlr4bnoIEKICBNUF9UT0tFTiAgICAgICAgICAgICAgICAgIE1vdmllUGlsb3QgVG9rZW7vvIzm
-nInlroPlsLHkuI3nlKjnlKjmiLflkI3lr4bnoIEKICBNUF9CQVNFX1VSTCAgICAgICAgICAgICAg
-IE1vdmllUGlsb3Qg5Zyw5Z2A77yM6buY6K6kIGh0dHA6Ly8xMjcuMC4wLjE6MzAwMQogIENPTlRB
-SU5FUl9OQU1FICAgICAgICAgICAg5a655Zmo5ZCN77yM6buY6K6kIG1vdmllcGlsb3QtdjIKICBV
-UFNUUkVBTV9SRU1PVEVfVVJMICAgICAgIOS4u+S7k+W6k+WcsOWdgAogIFVQU1RSRUFNX0JSQU5D
-SCAgICAgICAgICAg5Li75LuT5bqT5YiG5pSvCg==
+aW9uICAg5YWB6K646Z2eIDk5LiDlvIDlpLTniYjmnKwKICAtLXNraXAtZnJvbnRlbmQtYnVpbGQg
+IOWkjeeUqOW3suaehOW7uuW5tumqjOivgeeahOWJjeerryBkaXN0CiAgLWgsIC0taGVscCAgICAg
+ICAgICAgICAgICDmmL7npLrluK7liqkKCueOr+Wig+WPmOmHjzoKICBJTlNUQUxMX0NPTkZJR19G
+SUxFICAgICAgIOaMh+WumumFjee9ruaWh+S7tui3r+W+hAogIE1QX1VTRVJOQU1FICAgICAgICAg
+ICAgICAgTW92aWVQaWxvdCDnlKjmiLflkI0KICBNUF9QQVNTV09SRCAgICAgICAgICAgICAgIE1v
+dmllUGlsb3Qg5a+G56CBCiAgTVBfVE9LRU4gICAgICAgICAgICAgICAgICBNb3ZpZVBpbG90IFRv
+a2Vu77yM5pyJ5a6D5bCx5LiN55So55So5oi35ZCN5a+G56CBCiAgTVBfQkFTRV9VUkwgICAgICAg
+ICAgICAgICBNb3ZpZVBpbG90IOWcsOWdgO+8jOm7mOiupCBodHRwOi8vMTI3LjAuMC4xOjMwMDEK
+ICBDT05UQUlORVJfTkFNRSAgICAgICAgICAgIOWuueWZqOWQje+8jOm7mOiupCBtb3ZpZXBpbG90
+LXYyCiAgVVBTVFJFQU1fUkVNT1RFX1VSTCAgICAgICDkuLvku5PlupPlnLDlnYAKICBVUFNUUkVB
+TV9CUkFOQ0ggICAgICAgICAgIOS4u+S7k+W6k+WIhuaUrwo=
 USAGE_B64
   else
     printf '%s\n' "Usage: ./install.sh TARGET [options]"
     printf '%s\n' "Targets: all, p115strmhelper, p115disk"
-    printf '%s\n' "Options: --dry-run --verify --rollback latest --copy-only --force --allow-dirty --allow-nonfork-version -h --help"
+    printf '%s\n' "Options: --dry-run --verify --rollback latest --copy-only --force --allow-dirty --allow-nonfork-version --skip-frontend-build -h --help"
   fi
 }
 
@@ -137,6 +139,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=1
+        shift
+        ;;
+      --skip-frontend-build)
+        SKIP_FRONTEND_BUILD=1
         shift
         ;;
       --verify)
@@ -443,43 +449,48 @@ build_frontend_assets_if_needed() {
   plugin_abs="$REPO_DIR/$plugin_dir"
 
   [[ -f "$frontend_abs/package.json" ]] || return 0
-  require_cmd node
-  require_cmd npm
+  if [[ "$SKIP_FRONTEND_BUILD" -eq 1 ]]; then
+    log "Using prebuilt frontend assets for $pid"
+  else
+    require_cmd node
+    require_cmd npm
 
-  package_lock_tmp=""
-  yarn_lock_tmp=""
-  if [[ -f "$frontend_abs/package-lock.json" ]]; then
-    package_lock_tmp="$(mktemp)"
-    cp "$frontend_abs/package-lock.json" "$package_lock_tmp"
-  fi
-  if [[ -f "$frontend_abs/yarn.lock" ]]; then
-    yarn_lock_tmp="$(mktemp)"
-    cp "$frontend_abs/yarn.lock" "$yarn_lock_tmp"
-  fi
-
-  log "Building frontend assets for $pid"
-  set +e
-  (
-    cd "$frontend_abs"
-    if [[ -f package-lock.json ]]; then
-      npm ci
-    else
-      npm install
+    package_lock_tmp=""
+    yarn_lock_tmp=""
+    if [[ -f "$frontend_abs/package-lock.json" ]]; then
+      package_lock_tmp="$(mktemp)"
+      cp "$frontend_abs/package-lock.json" "$package_lock_tmp"
     fi
-    npm run build
-  )
-  build_status=$?
-  set -e
+    if [[ -f "$frontend_abs/yarn.lock" ]]; then
+      yarn_lock_tmp="$(mktemp)"
+      cp "$frontend_abs/yarn.lock" "$yarn_lock_tmp"
+    fi
 
-  if [[ -n "$package_lock_tmp" ]]; then
-    cp "$package_lock_tmp" "$frontend_abs/package-lock.json"
-    rm -f "$package_lock_tmp"
+    log "Building frontend assets for $pid"
+    set +e
+    (
+      cd "$frontend_abs"
+      if [[ -f package-lock.json ]]; then
+        npm ci
+      else
+        npm install
+      fi
+      npm run build
+    )
+    build_status=$?
+    set -e
+
+    if [[ -n "$package_lock_tmp" ]]; then
+      cp "$package_lock_tmp" "$frontend_abs/package-lock.json"
+      rm -f "$package_lock_tmp"
+    fi
+    if [[ -n "$yarn_lock_tmp" ]]; then
+      cp "$yarn_lock_tmp" "$frontend_abs/yarn.lock"
+      rm -f "$yarn_lock_tmp"
+    fi
+    [[ "$build_status" -eq 0 ]] || fail "Frontend build failed for $pid"
+
   fi
-  if [[ -n "$yarn_lock_tmp" ]]; then
-    cp "$yarn_lock_tmp" "$frontend_abs/yarn.lock"
-    rm -f "$yarn_lock_tmp"
-  fi
-  [[ "$build_status" -eq 0 ]] || fail "Frontend build failed for $pid"
 
   [[ -f "$frontend_abs/dist/assets/remoteEntry.js" ]] || fail "Frontend build missing remoteEntry.js for $pid"
   rm -rf "$plugin_abs/dist"

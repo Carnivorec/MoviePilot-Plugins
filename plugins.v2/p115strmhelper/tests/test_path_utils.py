@@ -9,34 +9,8 @@ PathUtils 测试模块
 """
 
 from pathlib import Path, PurePosixPath
-import sys
-from types import ModuleType, SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
-
-if "app.log" not in sys.modules:
-    app_module = ModuleType("app")
-    app_module.__path__ = []
-    app_log_module = ModuleType("app.log")
-    app_log_module.logger = SimpleNamespace(
-        debug=lambda *args, **kwargs: None,
-        info=lambda *args, **kwargs: None,
-        warning=lambda *args, **kwargs: None,
-        warn=lambda *args, **kwargs: None,
-        error=lambda *args, **kwargs: None,
-    )
-    sys.modules.setdefault("app", app_module)
-    sys.modules["app.log"] = app_log_module
-
-app_utils_module = sys.modules.setdefault("app.utils", ModuleType("app.utils"))
-app_utils_module.__path__ = []
-app_utils_system_module = ModuleType("app.utils.system")
-app_utils_system_module.SystemUtils = type(
-    "SystemUtils",
-    (),
-    {"exits_files": staticmethod(lambda *args, **kwargs: False)},
-)
-sys.modules["app.utils.system"] = app_utils_system_module
 
 from utils.path import PathUtils
 

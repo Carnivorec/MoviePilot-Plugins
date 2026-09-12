@@ -177,11 +177,11 @@
           </div>
         </transition>
       </v-card-text>
-      <v-card-actions class="px-3 py-2 d-flex config-actions" style="flex-shrink: 0;">
+      <v-card-actions class="px-3 py-2 d-flex" style="flex-shrink: 0;">
         <v-btn color="warning" variant="text" @click="emit('switch')" size="small" prepend-icon="mdi-arrow-left">
           返回
         </v-btn>
-        <v-spacer class="config-actions-spacer"></v-spacer>
+        <v-spacer></v-spacer>
         <v-btn color="primary" variant="text" @click="openDonateDialog" size="small" prepend-icon="mdi-gift">
           捐赠
         </v-btn>
@@ -379,6 +379,7 @@ const config = reactive({
   monitor_life_move_media_local_move_related_files: true,
   monitor_life_rename_auto_related_files: true,
   monitor_life_min_file_size: 0,
+  monitor_life_transfer_stall_timeout_minutes: 60,
   share_strm_config: [],
   share_strm_mediaservers: [],
   share_strm_media_server_refresh_delay: 0,
@@ -388,6 +389,7 @@ const config = reactive({
     auto_download_mediainfo: false,
     local_path: '',
     moviepilot_transfer: false,
+    iter_function: 'iter_share_files_with_path',
     speed_mode: 3,
   },
   share_strm_cleanup_config: {
@@ -419,6 +421,7 @@ const config = reactive({
   directory_upload_mode: 'compatibility',
   directory_upload_uploadext: 'mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v',
   directory_upload_copyext: 'srt,ssa,ass',
+  directory_upload_skip_bdmv_stream: true,
   directory_upload_path: [],
   directory_upload_clouddrive2_config: { enabled: false, prefix: '' },
   tg_search_channels: [],
@@ -457,6 +460,9 @@ const config = reactive({
   strm_generate_blacklist: [],
   mediainfo_download_whitelist: [],
   mediainfo_download_blacklist: [],
+  share_audit_queue_enabled: true,
+  share_audit_max_wait_seconds: 21600,
+  share_audit_retry_interval_seconds: 1800,
   strm_url_encode: false,
   storage_module: 'u115',
   sync_del_enabled: false,
@@ -1828,37 +1834,12 @@ provide('machineId', machineId);
   max-height: 85vh;
 }
 
-.config-actions {
-  gap: 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-.config-actions :deep(.v-btn) {
-  flex: 0 0 auto;
-}
-
 @media (max-width: 768px) {
   .config-main-card {
     flex: 1;
     min-height: 0;
     max-height: none;
     height: 100%;
-  }
-
-  .config-actions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .config-actions :deep(.v-btn) {
-    min-width: 96px !important;
-    flex: 0 0 96px;
-    white-space: nowrap;
-  }
-
-  .config-actions-spacer {
-    display: none;
   }
 }
 

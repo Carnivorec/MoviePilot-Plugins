@@ -7,15 +7,14 @@ from queue import Empty, Queue
 from tempfile import gettempdir
 from threading import Lock, Thread
 from time import perf_counter, sleep
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterator, List, Optional, Set, Tuple
 
 from p115client import check_response
+from p115client.tool.iterdir import share_iter_files
 from p115client.util import share_extract_payload
 
-from app.chain.transfer import TransferChain
 from app.core.config import settings
 from app.log import logger
-from app.schemas import FileItem
 
 from ....core.cache import sharestrmcacher
 from ....core.config import configer
@@ -30,9 +29,11 @@ from ....helper.mediaserver import MediaServerRefresh
 from ....schemas.share import ShareStrmConfig
 from ....schemas.size import CompareMinSize
 from ....utils.path import PathUtils
+from ....utils.rename_dict import RenameDictUtils
 from ....utils.sentry import sentry_manager
 from ....utils.strm import StrmGenerater, StrmUrlGetter
 
+from .audit_download_queue import share_audit_download_queue
 from .oof import ShareFilesDataCollector, ShareOOPServerHelper
 
 
@@ -82,6 +83,7 @@ class ShareStrmHelper:
         self.mediainfo_fail_dict: List = []
 
         self.download_mediainfo_list = []
+        self.share_media_contexts: Dict[str, List[Dict[str, Any]]] = {}
 
         self.scrape_refresh_queue = Deque()
         self.mp_transfer_queue = Deque()
@@ -158,32 +160,46 @@ class ShareStrmHelper:
         """
         交由 MoviePilot 整理文件
         """
-        transfer_chain = TransferChain()
         while len(self.mp_transfer_queue) != 0:
-            path = Path(self.mp_transfer_queue.popleft())
-            transfer_chain.do_transfer(
-                fileitem=FileItem(
-                    storage="local",
-                    type="file",
-                    path=path.as_posix(),
-                    name=path.name,
-                    basename=path.stem,
-                    extension=path.suffix[1:].lower(),
-                    size=path.stat().st_size,
-                    modify_time=path.stat().st_mtime,
+            entry = self.mp_transfer_queue.popleft()
+            if isinstance(entry, dict):
+                path = Path(entry["path"])
+                share_audit_download_queue.transfer_local_file(path, entry)
+            else:
+                share_audit_download_queue.transfer_local_file(Path(entry))
+
+    def _attach_related_media_contexts(self) -> None:
+        if not configer.rename_dict_supplement_enabled:
+            return
+        for entry in self.download_mediainfo_list:
+            if not entry.get("mp_transfer_after_download"):
+                continue
+            relation_key = entry.get("media_relation_key")
+            contexts = self.share_media_contexts.get(relation_key, [])
+            unique_contexts = {
+                f"{context.get('share_code')}:{context.get('file_id')}": context
+                for context in contexts
+            }
+            if len(unique_contexts) == 1:
+                entry["related_media"] = dict(next(iter(unique_contexts.values())))
+            elif len(unique_contexts) > 1:
+                logger.warning(
+                    f"【分享STRM生成】伴随文件匹配到多个同名主视频，"
+                    f"跳过媒体字段上下文: {entry.get('path')}"
                 )
-            )
 
     def __process_single_item(
         self,
         item: Dict,
         config: ShareStrmConfig,
+        detailed_data: bool,
     ) -> None:
         """
         处理单个 STRM 文件
 
         :param item (Dict): 网盘文件信息
         :param config (ShareStrmConfig): 分享 STRM 生成配置
+        :param detailed_data (bool): 是否为详细迭代数据
         """
         file_path = item["path"]
 
@@ -208,7 +224,7 @@ class ShareStrmHelper:
         new_file_path_str = str(new_file_path)
 
         try:
-            if config.auto_download_mediainfo:
+            if detailed_data and config.auto_download_mediainfo:
                 if file_path.suffix.lower() in self.download_mediaext:
                     with self.lock:
                         self.download_mediainfo_list.append(
@@ -226,7 +242,8 @@ class ShareStrmHelper:
 
             sfx_lower = file_path.suffix.lower()
             if (
-                config.moviepilot_transfer
+                detailed_data
+                and config.moviepilot_transfer
                 and config.moviepilot_transfer_download_rmt_audio_sub
                 and (
                     sfx_lower in settings.RMT_AUDIOEXT
@@ -234,19 +251,28 @@ class ShareStrmHelper:
                 )
             ):
                 file_path.parent.mkdir(parents=True, exist_ok=True)
-                with self.lock:
-                    self.download_mediainfo_list.append(
-                        {
-                            "type": "share",
-                            "share_code": config.share_code,
-                            "receive_code": config.share_receive,
-                            "file_id": item["id"],
-                            "path": file_path,
-                            "thumb": item.get("thumb", None),
-                            "sha1": item["sha1"],
-                            "mp_transfer_after_download": True,
-                        }
+                relation_key = None
+                if configer.rename_dict_supplement_enabled:
+                    relation_key = RenameDictUtils.get_media_relation_key(
+                        file_path.as_posix(),
+                        sfx_lower,
+                        settings.RMT_SUBEXT,
+                        storage="local",
                     )
+                with self.lock:
+                    download_item: Dict[str, Any] = {
+                        "type": "share",
+                        "share_code": config.share_code,
+                        "receive_code": config.share_receive,
+                        "file_id": item["id"],
+                        "path": file_path,
+                        "thumb": item.get("thumb", None),
+                        "sha1": item["sha1"],
+                        "mp_transfer_after_download": True,
+                    }
+                    if relation_key:
+                        download_item["media_relation_key"] = relation_key
+                    self.download_mediainfo_list.append(download_item)
                 return
 
             if sfx_lower not in self.rmt_mediaext:
@@ -296,10 +322,30 @@ class ShareStrmHelper:
                     self._strm_generated_paths.add(new_file_path_str)
             logger.info("【分享STRM生成】生成 STRM 文件成功: %s", str(new_file_path))
             cache_key = f"{config.share_code}:{config.share_receive}:{item['id']}"
-            sharestrmcacher.file_item_dict[cache_key] = {
-                "sha1": item["sha1"],
-                "size": item["size"],
-            }
+            cache_data = {"size": item["size"]}
+            if detailed_data:
+                cache_data["sha1"] = item["sha1"]
+            sharestrmcacher.file_item_dict[cache_key] = cache_data
+
+            if configer.rename_dict_supplement_enabled and config.moviepilot_transfer:
+                relation_key = RenameDictUtils.get_media_relation_key(
+                    file_path.as_posix(),
+                    sfx_lower,
+                    settings.RMT_SUBEXT,
+                    storage="local",
+                )
+                media_context = {
+                    "share_code": config.share_code,
+                    "receive_code": config.share_receive,
+                    "file_id": item["id"],
+                    "sha1": item.get("sha1"),
+                    "size": item.get("size"),
+                    "strm_url": strm_url,
+                }
+                with self.lock:
+                    self.share_media_contexts.setdefault(relation_key, []).append(
+                        media_context
+                    )
 
             if config.moviepilot_transfer:
                 self.mp_transfer_queue.append(new_file_path)
@@ -317,6 +363,38 @@ class ShareStrmHelper:
                 self.strm_fail_count += 1
                 self.strm_fail_dict[str(new_file_path)] = str(e)
             return
+
+    def _create_online_share_iterator(
+        self, config: ShareStrmConfig
+    ) -> Tuple[Iterator[Dict], bool]:
+        """
+        根据配置创建在线分享文件迭代器
+
+        :param config (ShareStrmConfig): 分享 STRM 生成配置
+
+        :return Tuple: 文件迭代器与是否为详细数据
+        """
+        if config.iter_function == "iter_share_files_with_path":
+            return (
+                iter_share_files_with_path(
+                    client=self.share_client,
+                    share_code=config.share_code,
+                    receive_code=config.share_receive,
+                    cid=0,
+                    speed_mode=config.speed_mode,
+                    **configer.get_ios_ua_app(),
+                ),
+                True,
+            )
+        return (
+            share_iter_files(
+                client=self.share_client,
+                share_code=config.share_code,
+                receive_code=config.share_receive,
+                cid=0,
+            ),
+            False,
+        )
 
     def generate_strm_files_for_configs(self, configs: List[ShareStrmConfig]) -> None:
         """
@@ -359,8 +437,7 @@ class ShareStrmHelper:
                     {
                         "share_code": config.share_code,
                         "receive_code": config.share_receive,
-                    },
-                    **configer.get_ios_ua_app(app=False),
+                    }
                 )
                 check_response(resp)
             except Exception:
@@ -384,8 +461,9 @@ class ShareStrmHelper:
                 logger.error(f"【分享STRM生成】校验分享状态出错{comment_info}: {e}")
                 continue
 
-            # 迭代器选择
             data_collector = None
+            allow_oop_upload = False
+            detailed_data = True
             temp_file = path_join(gettempdir(), f"share_data_{batch_id}.json.gz")
             download_success = ShareOOPServerHelper.download_share_files_data(
                 share_code=config.share_code,
@@ -398,17 +476,23 @@ class ShareStrmHelper:
                     temp_file
                 )
             else:
-                logger.info(f"【分享STRM生成】数据不存在，开始收集数据{comment_info}")
-                data_iter = iter_share_files_with_path(
-                    client=self.share_client,
-                    share_code=config.share_code,
-                    receive_code=config.share_receive,
-                    cid=0,
-                    speed_mode=config.speed_mode,
-                    **configer.get_ios_ua_app(),
-                )
-                data_collector = ShareFilesDataCollector(data_iter, temp_file)
-                data_iter = data_collector
+                logger.info(f"【分享STRM生成】数据不存在，开始在线迭代{comment_info}")
+                data_iter, detailed_data = self._create_online_share_iterator(config)
+                if detailed_data:
+                    data_collector = ShareFilesDataCollector(data_iter, temp_file)
+                    data_iter = data_collector
+                    allow_oop_upload = True
+                else:
+                    logger.info(
+                        "【分享STRM生成】使用 share_iter_files 简略数据，"
+                        f"跳过 OOP 数据收集和上传{comment_info}"
+                    )
+
+            logger.info(
+                f"【分享STRM生成】数据来源: "
+                f"{'OOP 详细数据' if download_success else config.iter_function}, "
+                f"detailed_data={detailed_data}, allow_oop_upload={allow_oop_upload}"
+            )
 
             has_exception = False
             try:
@@ -420,6 +504,7 @@ class ShareStrmHelper:
                                 self.__process_single_item,
                                 item=item,
                                 config=config,
+                                detailed_data=detailed_data,
                             ): item
                             for item in batch
                         }
@@ -467,7 +552,7 @@ class ShareStrmHelper:
                     f"【分享STRM生成】使用下载数据完成，文件大小: {file_size_mb:.2f} MB{comment_info}"
                 )
                 cleanup_temp_file(temp_file)
-            else:
+            elif allow_oop_upload and data_collector is not None:
                 file_path, data_count = data_collector.get_file_info()
                 if data_count > 0:
                     file_size_mb = path_getsize(file_path) / 1024 / 1024
@@ -495,18 +580,57 @@ class ShareStrmHelper:
 
             self.scrape_refresh_media(config)
 
-        self.mediainfo_count, self.mediainfo_fail_count, self.mediainfo_fail_dict = (
-            self.mediainfodownloader.batch_auto_share_downloader(
-                downloads_list=self.download_mediainfo_list
-            )
-        )
+        self._attach_related_media_contexts()
 
-        for entry in self.download_mediainfo_list:
+        (
+            immediate_downloads,
+            queued_count,
+            terminal_failures,
+        ) = share_audit_download_queue.partition_downloads(self.download_mediainfo_list)
+
+        deferred_paths: Set[str] = set()
+        if immediate_downloads:
+            (
+                self.mediainfo_count,
+                self.mediainfo_fail_count,
+                self.mediainfo_fail_dict,
+            ) = self.mediainfodownloader.batch_auto_share_downloader(
+                downloads_list=immediate_downloads
+            )
+            failed_paths = set(self.mediainfo_fail_dict)
+            failed_items = [
+                item
+                for item in immediate_downloads
+                if Path(item["path"]).as_posix() in failed_paths
+            ]
+            deferred_paths = set(
+                share_audit_download_queue.enqueue_failed_auditing_downloads(
+                    failed_items
+                )
+            )
+            if deferred_paths:
+                self.mediainfo_fail_dict = [
+                    path
+                    for path in self.mediainfo_fail_dict
+                    if path not in deferred_paths
+                ]
+                self.mediainfo_fail_count = len(self.mediainfo_fail_dict)
+                queued_count += len(deferred_paths)
+        self.mediainfo_fail_count += len(terminal_failures)
+        self.mediainfo_fail_dict.extend(terminal_failures)
+        if queued_count:
+            logger.info(
+                f"【分享STRM生成】{queued_count} 个文件正在审核，已转入后台下载队列"
+            )
+
+        for entry in immediate_downloads:
             if not entry.get("mp_transfer_after_download"):
                 continue
             path = Path(entry["path"])
+            if path.as_posix() in deferred_paths:
+                continue
             if path.is_file():
-                self.mp_transfer_queue.append(path)
+                self.mp_transfer_queue.append(entry)
         if self.mp_transfer_queue:
             self.mp_transfer()
 
@@ -577,9 +701,6 @@ class ShareInteractiveGenStrmQueue:
 
     def __init__(self) -> None:
         self.mediainfodownloader: Optional[MediaInfoDownloader] = None
-        self.mediainfo_downloader_factory: Optional[
-            Callable[[str], MediaInfoDownloader]
-        ] = None
         self._task_queue: Queue = Queue()
         self._worker_thread: Optional[Thread] = None
         self._worker_lock = Lock()
@@ -593,16 +714,6 @@ class ShareInteractiveGenStrmQueue:
         :param mediainfodownloader (MediaInfoDownloader): MediaInfoDownloader 实例，可为 None
         """
         self.mediainfodownloader = mediainfodownloader
-
-    def bind_mediainfo_downloader_factory(
-        self, factory: Optional[Callable[[str], MediaInfoDownloader]]
-    ) -> None:
-        """
-        绑定媒体信息下载器工厂
-
-        :param factory: 接收任务名称并返回 MediaInfoDownloader 的工厂，可为 None
-        """
-        self.mediainfo_downloader_factory = factory
 
     @staticmethod
     def validate_prerequisites() -> Optional[str]:
@@ -706,17 +817,7 @@ class ShareInteractiveGenStrmQueue:
             )
             return
 
-        mediainfo_downloader: Optional[MediaInfoDownloader] = None
-        own_downloader = False
-        if self.mediainfo_downloader_factory:
-            mediainfo_downloader = self.mediainfo_downloader_factory(
-                "分享交互生成STRM"
-            )
-            own_downloader = True
-        else:
-            mediainfo_downloader = self.mediainfodownloader
-
-        if not mediainfo_downloader:
+        if not self.mediainfodownloader:
             logger.error("【分享交互生成STRM】MediaInfoDownloader 未初始化")
             self._post_user_message(
                 channel=channel,
@@ -730,36 +831,32 @@ class ShareInteractiveGenStrmQueue:
             )
             return
 
-        try:
-            g = configer.share_interactive_gen_strm_config
-            virtual = ShareStrmConfig(
-                enabled=True,
-                comment="分享交互生成STRM",
-                share_link=share_url,
-                share_path="/",
-                local_path=(g.local_path or "").strip(),
-                min_file_size=g.min_file_size,
-                auto_download_mediainfo=g.auto_download_mediainfo,
-                moviepilot_transfer=g.moviepilot_transfer,
-                moviepilot_transfer_download_rmt_audio_sub=(
-                    g.moviepilot_transfer_download_rmt_audio_sub
-                ),
-                speed_mode=g.speed_mode,
-                scrape_metadata=False,
-                media_server_refresh=False,
-            )
+        g = configer.share_interactive_gen_strm_config
+        virtual = ShareStrmConfig(
+            enabled=True,
+            comment="分享交互生成STRM",
+            share_link=share_url,
+            share_path="/",
+            local_path=(g.local_path or "").strip(),
+            min_file_size=g.min_file_size,
+            auto_download_mediainfo=g.auto_download_mediainfo,
+            moviepilot_transfer=g.moviepilot_transfer,
+            moviepilot_transfer_download_rmt_audio_sub=(
+                g.moviepilot_transfer_download_rmt_audio_sub
+            ),
+            iter_function=g.iter_function,
+            speed_mode=g.speed_mode,
+            scrape_metadata=False,
+            media_server_refresh=False,
+        )
 
-            strm_helper = ShareStrmHelper(mediainfodownloader=mediainfo_downloader)
-            strm_helper.strm_exec_history_kind = "share_interactive"
-            strm_helper.strm_exec_history_extra = {"share_url": share_url}
-            strm_helper.generate_strm_files_for_configs([virtual])
-            strm_count, mediainfo_count, strm_fail_count, mediainfo_fail_count = (
-                strm_helper.get_generate_total()
-            )
-        finally:
-            if own_downloader and mediainfo_downloader:
-                mediainfo_downloader.close()
-                logger.info("【分享交互生成STRM】独立媒体信息下载器已释放")
+        strm_helper = ShareStrmHelper(mediainfodownloader=self.mediainfodownloader)
+        strm_helper.strm_exec_history_kind = "share_interactive"
+        strm_helper.strm_exec_history_extra = {"share_url": share_url}
+        strm_helper.generate_strm_files_for_configs([virtual])
+        strm_count, mediainfo_count, strm_fail_count, mediainfo_fail_count = (
+            strm_helper.get_generate_total()
+        )
 
         detail = (
             f"\n📄 生成STRM文件 {strm_count} 个\n"

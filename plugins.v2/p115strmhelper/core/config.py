@@ -278,6 +278,15 @@ class ConfigManager(BaseModel):
             self.hdhive_checkin_gamble_enabled = False
         return self
 
+    @model_validator(mode="after")
+    def _validate_share_audit_wait(self) -> "ConfigManager":
+        """
+        校验分享审核重试间隔不超过最长等待时间
+        """
+        if self.share_audit_retry_interval_seconds > self.share_audit_max_wait_seconds:
+            raise ValueError("分享审核重试间隔不能超过最长等待时间")
+        return self
+
     PLUSIN_NAME: str = Field(
         default="P115StrmHelper", min_length=1, description="插件名称"
     )
@@ -557,6 +566,11 @@ class ConfigManager(BaseModel):
     monitor_life_first_pull_mode: str = Field(
         default="latest", min_length=1, description="生活事件启动拉取模式"
     )
+    monitor_life_transfer_stall_timeout_minutes: int = Field(
+        default=60,
+        ge=1,
+        description="生活事件等待 MoviePilot 整理队列无进展的超时时间（分钟）",
+    )
 
     share_strm_config: List[ShareStrmConfig] = Field(
         default_factory=list, description="分享 STRM 生成配置"
@@ -569,6 +583,21 @@ class ConfigManager(BaseModel):
     )
     share_strm_mp_mediaserver_paths: Optional[str] = Field(
         default=None, description="MP-媒体库 目录转换"
+    )
+    share_audit_queue_enabled: bool = Field(
+        default=True, description="分享文件审核等待队列开关"
+    )
+    share_audit_max_wait_seconds: int = Field(
+        default=6 * 60 * 60,
+        ge=60,
+        le=7 * 24 * 60 * 60,
+        description="分享文件审核最长等待时间（秒）",
+    )
+    share_audit_retry_interval_seconds: int = Field(
+        default=30 * 60,
+        ge=60,
+        le=6 * 60 * 60,
+        description="分享文件审核重试间隔（秒）",
     )
     share_interactive_gen_strm_config: ShareInteractiveGenStrmConfig = Field(
         default_factory=ShareInteractiveGenStrmConfig,
@@ -650,11 +679,13 @@ class ConfigManager(BaseModel):
     )
     directory_upload_uploadext: str = Field(
         default="mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
-        min_length=1,
-        description="可上传文件后缀",
+        description="可上传文件后缀，留空或填 * 表示不限制后缀",
     )
     directory_upload_copyext: str = Field(
-        default="srt,ssa,ass", min_length=1, description="可本地操作文件后缀"
+        default="srt,ssa,ass", description="可本地操作文件后缀"
+    )
+    directory_upload_skip_bdmv_stream: bool = Field(
+        default=True, description="跳过蓝光原盘 STREAM 目录"
     )
     directory_upload_path: Optional[List[Dict]] = Field(
         default=None, description="监控目录信息"
@@ -744,7 +775,7 @@ class ConfigManager(BaseModel):
     )
     rename_dict_supplement_enabled: bool = Field(
         default=False,
-        description="媒体元数据补充",
+        description="媒体元数据补充，关联字幕和外挂音轨自动复用同名视频参数",
     )
     rename_dict_supplement_overwrite_mode: Literal["fill_missing", "always"] = Field(
         default="fill_missing",
@@ -858,7 +889,7 @@ class ConfigManager(BaseModel):
         """
         返回 p115center 许可证
         """
-        return "26eaadf77caa39bf505b0103bb25a0489e15fbb1b137aa9adb128ef93508f047"
+        return "0e75f9901b53ad40501b711d20e3ae102b869d88f4adfb8e7a966088973c4100"
 
     @property
     def plugin_aligo_path(self) -> Path:

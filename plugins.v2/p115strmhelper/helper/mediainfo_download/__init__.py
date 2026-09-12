@@ -19,15 +19,15 @@ from httpx import (
 )
 from orjson import loads
 from p115center import P115Center
-from p115pickcode import pickcode_to_id
 from p115client import check_response
 from p115client.const import TYPE_TO_SUFFIXES
-from p115client.util import reduce_image_url_layers
 from p115client.tool.iterdir import (
-    _iter_fs_files,
+    iter_file_list,
     iter_files,
     iter_files_with_path_skim,
 )
+from p115client.util import reduce_image_url_layers
+from p115pickcode import pickcode_to_id
 from zstandard import ZstdCompressor, ZstdDecompressor
 
 from app.log import logger
@@ -97,13 +97,7 @@ class MediaInfoDownloader:
         logger.debug(f"【媒体信息文件下载】初始化请求头：{self.headers}")
 
     def __del__(self):
-        cacher = getattr(self, "oof_fast_mi_cacher", None)
-        if not cacher:
-            return
-        try:
-            cacher.close()
-        except Exception as e:
-            logger.debug(f"【媒体信息文件下载】关闭 OOF 本地缓存句柄失败: {e}")
+        self.oof_fast_mi_cacher.close()
 
     def _record_mediainfo_success(self) -> None:
         """
@@ -132,9 +126,9 @@ class MediaInfoDownloader:
                 self._record_mediainfo_failure(Path(path).as_posix())
 
     @staticmethod
-    async def async_is_file_leq_1k(file_path: str | Path) -> bool:
+    async def async_is_file_leq_100b(file_path: str | Path) -> bool:
         """
-        判断文件是否小于等于 100B
+        判断文件是否小于等于 100 B
 
         如果文件不存在，返回 True
         """
@@ -324,7 +318,7 @@ class MediaInfoDownloader:
                                 await f.write(chunk)
                                 file_content_buffer.extend(chunk)
 
-                    if await self.async_is_file_leq_1k(file_path):
+                    if await self.async_is_file_leq_100b(file_path):
                         raise DownloadValidationFail(
                             f"【媒体信息文件下载】文件 {file_name} 在下载后验证失败"
                         )
@@ -495,11 +489,12 @@ class MediaInfoDownloader:
                 )
                 check_response(resp)
                 attr = next(
-                    _iter_fs_files(
+                    iter_file_list(
                         client=self.client,
                         payload=scid,
                         page_size=1,
                         app="web",
+                        max_workers=0,
                         **configer.get_ios_ua_app(app=False),
                     )
                 )
@@ -552,11 +547,12 @@ class MediaInfoDownloader:
                 # 休眠等待 115 全部转存完成
                 time_sleep(8)
                 attr = next(
-                    _iter_fs_files(
+                    iter_file_list(
                         client=self.client,
                         payload=scid,
                         page_size=1,
                         app="web",
+                        max_workers=0,
                         **configer.get_ios_ua_app(app=False),
                     )
                 )

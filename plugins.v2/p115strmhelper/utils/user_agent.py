@@ -3,7 +3,7 @@ from random import randint, choice
 from p115client import P115Client, check_response
 
 from app.core.cache import cached
-from app.log import logger
+
 from .p115_timeout import build_p115_request_kwargs
 
 
@@ -16,33 +16,16 @@ class UserAgentUtils:
     @cached(region="p115strmhelper_util_real_app_ver", ttl=60 * 60, skip_none=True)
     def get_real_app_ver() -> str:
         """
-        /* 步骤1：获取真实 app_ver
-        ========
-        目标：
-        1) 从 115 appversion 接口获取真实 iOS 端版本号。
-        2) 为 AppVerPatcher 提供新版 p115client._app_version 值。
-        数据源：
-        1) P115Client.app_version_list2()。
-        2) build_p115_request_kwargs(timeout=10)。
-        操作要点：
-        1) 版本探测请求必须携带短 timeout，避免插件初始化被长期阻塞。
-        2) 请求失败时使用本地固定版本兜住初始化流程。
-        */
+        获取 115 iOS 端真实版本号
+
+        :return str: 形如 "38.0.2" 的版本号
         """
-        logger.info("【User-Agent】真实 app_ver 获取步骤1开始")
-        # // 1.1 先使用短 timeout 探测真实 iOS App 版本
         try:
-            resp = P115Client.app_version_list2(
-                **build_p115_request_kwargs(timeout=10)
-            )
+            resp = P115Client.app_version_list2(**build_p115_request_kwargs(timeout=10))
             check_response(resp)
-            version = resp["data"]["iOS-iPhone"]["version_code"]
-        except Exception as e:
-            # // 1.2 版本探测失败时使用固定版本，避免插件初始化失败
-            logger.warning(f"【User-Agent】真实 app_ver 获取失败，使用默认版本: {e}")
-            version = "38.0.2"
-        logger.info("【User-Agent】真实 app_ver 获取步骤1结束")
-        return version
+            return resp["data"]["iOS-iPhone"]["version_code"]
+        except Exception:
+            return "38.0.2"
 
     @staticmethod
     @cached(
@@ -55,9 +38,7 @@ class UserAgentUtils:
         :return str: 完整的 User-Agent 字符串
         """
         try:
-            resp = P115Client.app_version_list2(
-                **build_p115_request_kwargs(timeout=10)
-            )
+            resp = P115Client.app_version_list2(**build_p115_request_kwargs(timeout=10))
             check_response(resp)
             udown_version = resp["data"]["iOS-iPhone"]["version_code"]
             wangpan_version = resp["data"]["115wangpan_iOS"]["version_code"]

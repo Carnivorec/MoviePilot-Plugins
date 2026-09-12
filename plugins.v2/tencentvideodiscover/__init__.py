@@ -1,16 +1,18 @@
+import asyncio
 import re
-from typing import Any, List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from app import schemas
-from app.core.config import settings
-from app.core.event import eventmanager, Event
 from app.core.cache import cached
+from app.core.config import settings
+from app.core.event import Event, eventmanager
+from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import DiscoverSourceEventData
-from app.schemas.types import ChainEventType
+from app.schemas.types import ChainEventType, MediaType
 
 BASE_UI: Optional[List] = None
 
@@ -54,9 +56,6 @@ def init_base_ui():
                 "page_type": "channel_operation",
                 "page_id": "channel_list_second_page",
             }
-        }
-        body["page_context"] = {
-            "data_src_647bd63b21ef4b64b50fe65201d89c6e_page": "0",
         }
         url = "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData"
         try:
@@ -168,7 +167,7 @@ class TencentVideoDiscover(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/DDSRem-Dev/MoviePilot-Plugins/main/icons/tencentvideo_A.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -182,6 +181,7 @@ class TencentVideoDiscover(_PluginBase):
 
     # 私有属性
     _enabled = False
+    _identity_cache_key = "media_identity"
 
     def init_plugin(self, config: dict = None):
         """
@@ -203,6 +203,194 @@ class TencentVideoDiscover(_PluginBase):
         :return: 插件启用状态
         """
         return self._enabled
+
+    def get_module(self) -> Dict[str, Any]:
+        """
+        返回腾讯视频媒体识别模块
+
+        :return Dict: 模块方法映射
+        """
+        return {
+            "recognize_media": self.recognize_media,
+            "async_recognize_media": self.async_recognize_media,
+        }
+
+    def _save_media_identities(self, items: List[Dict[str, Any]]) -> None:
+        identities = self.get_data(self._identity_cache_key) or {}
+        for item in items:
+            media_id = str(item.get("cid") or "")
+            title = item.get("title")
+            if not media_id or not title:
+                continue
+            identities[media_id] = {
+                "title": title,
+                "year": str(item.get("year") or "").strip() or None,
+            }
+        self.save_data(self._identity_cache_key, dict(list(identities.items())[-2000:]))
+
+    def _get_media_identity(self, media_id: str) -> Dict[str, Any]:
+        identities = self.get_data(self._identity_cache_key) or {}
+        return identities.get(str(media_id)) or {}
+
+    def _remember_media_identity(
+        self, media_id: str, title: str, year: Optional[str]
+    ) -> None:
+        identities = self.get_data(self._identity_cache_key) or {}
+        identities[str(media_id)] = {"title": title, "year": year}
+        self.save_data(self._identity_cache_key, dict(list(identities.items())[-2000:]))
+
+    @staticmethod
+    def _normalize_media_type(mtype: Any) -> Optional[MediaType]:
+        if isinstance(mtype, MediaType):
+            return mtype
+        try:
+            return MediaType(mtype) if mtype else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _fetch_tencent_media(media_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            response = requests.get(
+                "https://node.video.qq.com/x/api/float_vinfo2",
+                params={"cid": media_id},
+                headers=HEADERS,
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json().get("c") or {}
+            if not data.get("title"):
+                return None
+            return {
+                "title": data.get("title"),
+                "year": str(data.get("year") or "").strip() or None,
+                "overview": data.get("description"),
+            }
+        except (requests.RequestException, ValueError) as err:
+            logger.warning(f"腾讯视频媒体详情查询失败：{media_id} - {err}")
+            return None
+
+    def recognize_media(
+        self,
+        meta: Any = None,
+        mtype: Any = None,
+        source: Optional[str] = None,
+        mediaid: Optional[str] = None,
+        cache: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        通过腾讯视频 CID 识别媒体信息
+
+        :param meta (Any): 已知媒体元数据
+        :param mtype (MediaType): 媒体类型
+        :param source (str): 媒体来源
+        :param mediaid (str): 腾讯视频 CID
+        :param cache (bool): 是否使用 MoviePilot 识别缓存
+        :param kwargs (Any): 兼容 MoviePilot 模块参数
+
+        :return Any: 识别成功返回媒体信息，否则返回 None
+        """
+        if (
+            str(source or "").lower()
+            not in {
+                "tencentvideo",
+                "tencentvideodiscover",
+            }
+            or not mediaid
+        ):
+            return None
+        media_type = self._normalize_media_type(mtype or getattr(meta, "type", None))
+        source_media = self._fetch_tencent_media(
+            str(mediaid)
+        ) or self._get_media_identity(str(mediaid))
+        title = source_media.get("title") or getattr(meta, "title", None)
+        year = source_media.get("year") or getattr(meta, "year", None)
+        if not title:
+            return None
+        self._remember_media_identity(str(mediaid), title, str(year) if year else None)
+        recognize_meta = MetaInfo(title)
+        recognize_meta.year = str(year) if year else None
+        recognize_meta.type = media_type
+        from app.chain.media import MediaChain
+
+        mediainfo = MediaChain().recognize_media(
+            meta=recognize_meta,
+            mtype=media_type,
+            source="themoviedb",
+            cache=cache,
+        )
+        if not mediainfo:
+            return None
+        mediainfo.source = "tencentvideo"
+        mediainfo.media_id = str(mediaid)
+        if source_media.get("overview") and not mediainfo.overview:
+            mediainfo.overview = source_media["overview"]
+        return mediainfo
+
+    async def async_recognize_media(
+        self,
+        meta: Any = None,
+        mtype: Any = None,
+        source: Optional[str] = None,
+        mediaid: Optional[str] = None,
+        cache: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        异步通过腾讯视频 CID 识别媒体信息
+
+        :param meta (Any): 已知媒体元数据
+        :param mtype (MediaType): 媒体类型
+        :param source (str): 媒体来源
+        :param mediaid (str): 腾讯视频 CID
+        :param cache (bool): 是否使用 MoviePilot 识别缓存
+        :param kwargs (Any): 兼容 MoviePilot 模块参数
+
+        :return Any: 识别成功返回媒体信息，否则返回 None
+        """
+        if (
+            str(source or "").lower()
+            not in {
+                "tencentvideo",
+                "tencentvideodiscover",
+            }
+            or not mediaid
+        ):
+            return None
+        media_type = self._normalize_media_type(mtype or getattr(meta, "type", None))
+        source_media = await asyncio.to_thread(self._fetch_tencent_media, str(mediaid))
+        source_media = source_media or self._get_media_identity(str(mediaid))
+        title = source_media.get("title") or getattr(meta, "title", None)
+        year = source_media.get("year") or getattr(meta, "year", None)
+        if not title:
+            return None
+        identities = await self.async_get_data(self._identity_cache_key) or {}
+        identities[str(mediaid)] = {
+            "title": title,
+            "year": str(year) if year else None,
+        }
+        await self.async_save_data(
+            self._identity_cache_key, dict(list(identities.items())[-2000:])
+        )
+        recognize_meta = MetaInfo(title)
+        recognize_meta.year = str(year) if year else None
+        recognize_meta.type = media_type
+        from app.chain.media import MediaChain
+
+        mediainfo = await MediaChain().async_recognize_media(
+            meta=recognize_meta,
+            mtype=media_type,
+            source="themoviedb",
+            cache=cache,
+        )
+        if not mediainfo:
+            return None
+        mediainfo.source = "tencentvideo"
+        mediainfo.media_id = str(mediaid)
+        if source_media.get("overview") and not mediainfo.overview:
+            mediainfo.overview = source_media["overview"]
+        return mediainfo
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -268,10 +456,11 @@ class TencentVideoDiscover(_PluginBase):
         pass
 
     @cached(region="tencentvideo_discover", ttl=1800, skip_none=True)
-    def __request(self, page, mtype, **kwargs) -> List[Dict]:
+    def __request(self, page: int, mtype: str, **kwargs: Any) -> List[Dict]:
         """
         请求腾讯视频 API
         """
+        page = max(int(page), 1)
         body = {
             "page_params": {
                 "channel_id": CHANNEL_PARAMS[mtype]["Id"],
@@ -283,37 +472,50 @@ class TencentVideoDiscover(_PluginBase):
             body["page_params"]["filter_params"] = "&".join(
                 [f"{k}={v}" for k, v in kwargs.items()]
             )
-        if str(page) != "1":
-            body["page_context"] = {
-                "data_src_647bd63b21ef4b64b50fe65201d89c6e_page": str(int(page) - 1),
-            }
         url = "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData"
-        try:
+
+        def request_data() -> Dict[str, Any]:
             response = requests.post(url, params=PARAMS, json=body, headers=HEADERS)
             response.raise_for_status()
-            data = response.json().get("data")
+            return response.json().get("data") or {}
+
+        try:
+            data = request_data()
             if not data:
                 logger.error(f"No data returned for mtype {mtype}, page {page}")
                 return []
 
-            module_list_datas = data.get("module_list_datas", [])
-            if len(module_list_datas) < 2:
-                logger.error(
-                    f"module_list_datas has insufficient length for mtype {mtype}, page {page}: {module_list_datas}"
+            if page > 1:
+                next_page_context = data.get("next_page_context", {})
+                page_context_key = next(
+                    (
+                        key
+                        for key in next_page_context
+                        if key.startswith("_ds_cli_") and key.endswith("_page")
+                    ),
+                    None,
                 )
-                return []
+                if not page_context_key:
+                    logger.error(
+                        f"No page context returned for mtype {mtype}, page {page}"
+                    )
+                    return []
+                body["page_context"] = {page_context_key: str(page - 1)}
+                data = request_data()
+                if not data:
+                    logger.error(f"No data returned for mtype {mtype}, page {page}")
+                    return []
 
-            module_datas = module_list_datas[1].get("module_datas", [])
-            if not module_datas:
-                logger.error(f"No module_datas for mtype {mtype}, page {page}")
-                return []
+            for module_list_data in data.get("module_list_datas", []):
+                for module_data in module_list_data.get("module_datas", []):
+                    item_datas = module_data.get("item_data_lists", {}).get(
+                        "item_datas", []
+                    )
+                    if any(str(item.get("item_type")) == "2" for item in item_datas):
+                        return item_datas
 
-            item_data_lists = module_datas[0].get("item_data_lists", {})
-            item_datas = item_data_lists.get("item_datas", [])
-            if not item_datas:
-                logger.warning(f"No item_datas for mtype {mtype}, page {page}")
-
-            return item_datas
+            logger.warning(f"No media item data for mtype {mtype}, page {page}")
+            return []
         except requests.RequestException as e:
             logger.error(
                 f"Failed to fetch data for mtype {mtype}, page {page}: {str(e)}"
@@ -389,6 +591,7 @@ class TencentVideoDiscover(_PluginBase):
             )
             return schemas.MediaInfo(
                 type="电影",
+                source="tencentvideo",
                 title=movie_info.get("title"),
                 year=movie_info.get("year"),
                 title_year=f"{movie_info.get('title')} ({movie_info.get('year')})",
@@ -427,6 +630,7 @@ class TencentVideoDiscover(_PluginBase):
             )
             return schemas.MediaInfo(
                 type="电视剧",
+                source="tencentvideo",
                 title=series_info.get("title"),
                 year=series_info.get("year"),
                 title_year=f"{series_info.get('title')} ({series_info.get('year')})",
@@ -491,18 +695,16 @@ class TencentVideoDiscover(_PluginBase):
             return []
         if not result:
             return []
+        media_items = [
+            item.get("item_params", {})
+            for item in result
+            if str(item.get("item_type", "")) == "2"
+        ]
+        self._save_media_identities(media_items)
         if mtype == "movie":
-            results = [
-                __movie_to_media(movie.get("item_params", {}))
-                for movie in result
-                if str(movie.get("item_type", "")) == "2"
-            ]
+            results = [__movie_to_media(movie_info) for movie_info in media_items]
         else:
-            results = [
-                __series_to_media(series.get("item_params", {}))
-                for series in result
-                if str(series.get("item_type", "")) == "2"
-            ]
+            results = [__series_to_media(series_info) for series_info in media_items]
         return results
 
     @staticmethod
@@ -551,7 +753,7 @@ class TencentVideoDiscover(_PluginBase):
         event_data: DiscoverSourceEventData = event.event_data
         tencentvideo_source = schemas.DiscoverMediaSource(
             name="腾讯视频",
-            mediaid_prefix="tencentvideodiscover",
+            mediaid_prefix="tencentvideo",
             api_path=f"plugin/TencentVideoDiscover/tencentvideo_discover?apikey={settings.API_TOKEN}",
             filter_params={
                 "mtype": "tv",

@@ -3,38 +3,13 @@ DirectoryTree / RedisStorage / TxtFileStorage 测试模块
 """
 
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 
 # 注入 version mock，避免 CI 中插件目录的 version.py 被优先加载
 _version_mod = ModuleType("version")
 _version_mod.APP_VERSION = "test"
 _version_mod.FRONTEND_VERSION = "test"
 sys.modules["version"] = _version_mod
-
-# 注入 MoviePilot 运行时 mock，避免本地单元测试依赖完整 app 包
-_app_mod = ModuleType("app")
-_app_core_mod = ModuleType("app.core")
-_app_core_config_mod = ModuleType("app.core.config")
-_app_core_config_mod.settings = SimpleNamespace(CACHE_BACKEND_TYPE="txt")
-_app_helper_mod = ModuleType("app.helper")
-_app_helper_redis_mod = ModuleType("app.helper.redis")
-
-class _RedisHelperStub:
-    def __init__(self, *args, **kwargs):
-        self.client = None
-
-    def _connect(self):
-        if self.client is None:
-            from unittest.mock import MagicMock
-
-            self.client = MagicMock()
-
-_app_helper_redis_mod.RedisHelper = _RedisHelperStub
-sys.modules["app"] = _app_mod
-sys.modules["app.core"] = _app_core_mod
-sys.modules["app.core.config"] = _app_core_config_mod
-sys.modules["app.helper"] = _app_helper_mod
-sys.modules["app.helper.redis"] = _app_helper_redis_mod
 
 from pathlib import Path
 from tempfile import TemporaryDirectory

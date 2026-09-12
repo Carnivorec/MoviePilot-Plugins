@@ -733,6 +733,7 @@ class FullSyncStrmHelper:
                         "cid": parent_id,
                         "with_ancestors": True,
                         "cooldown": 1.5,
+                        "use_media_api": False,
                         **configer.get_ios_ua_app(),
                     }
                 logger.debug(
@@ -896,6 +897,7 @@ class FullSyncStrmHelper:
                             "cid": parent_id,
                             "with_ancestors": True,
                             "cooldown": 1.5,
+                            "use_media_api": False,
                             **configer.get_ios_ua_app(),
                         }
                     logger.debug(
