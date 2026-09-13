@@ -544,6 +544,10 @@ def export_dir_worker_main(
     request_kwargs: Dict[str, Any] = {}
     try:
         if client_factory is None:
+            from ...utils.p115_fork import reset_p115client_cache_locks
+
+            reset_count = reset_p115client_cache_locks()
+            context.log("cache_locks_reset", count=reset_count)
             from ...core.p115_client import create_client
 
             client_factory = create_client
