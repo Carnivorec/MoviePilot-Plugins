@@ -17,7 +17,23 @@ def _load_module(name: str, path: Path) -> Any:
     return module
 
 
+def _linux_rss_field(field: str) -> Optional[int]:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith(field + ":"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def _peak_rss_bytes() -> Optional[int]:
+    # getrusage 的高水位会跨 exec 保留；VmHWM 才是当前解释器的地址空间峰值
+    peak = _linux_rss_field("VmHWM")
+    if peak is not None:
+        return peak
     try:
         import resource
 
@@ -30,9 +46,13 @@ def _peak_rss_bytes() -> Optional[int]:
 class _JsonLogHandler(logging.Handler):
     def emit(self, record):
         """以 JSON 行实时输出日志，不与标准输出的结果混用"""
+        message = record.getMessage()
+        rss = _linux_rss_field("VmRSS")
+        if rss is not None:
+            message += f" worker_rss_mib={rss / 1024 / 1024:.1f}"
         print(
             json.dumps(
-                {"level": record.levelname.lower(), "message": record.getMessage()},
+                {"level": record.levelname.lower(), "message": message},
                 ensure_ascii=False,
             ),
             file=sys.stderr,
