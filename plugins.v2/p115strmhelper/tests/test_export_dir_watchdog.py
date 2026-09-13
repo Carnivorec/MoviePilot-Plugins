@@ -312,6 +312,7 @@ class ExportDirWatchdogTest(unittest.TestCase):
         ), self.assertRaisesRegex(OSError, "cannot fork"):
             self.module.run_worker_with_watchdog(
                 params={"watchdog_timeout": 1}, context=self._context(),
+                worker_target=_sleeping_worker,
             )
         process.close.assert_called_once()
         self.assertTrue(queue._closed)

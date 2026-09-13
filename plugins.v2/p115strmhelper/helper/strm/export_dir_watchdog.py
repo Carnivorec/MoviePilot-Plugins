@@ -30,7 +30,14 @@ try:
 except ImportError:  # pragma: no cover - 兼容旧版 p115client
     from p115client.tool.export_dir import parse_export_dir_as_path_iter
 
-from app.log import logger
+class _MoviePilotLogger:
+    def __getattr__(self, name):
+        from app.log import logger as app_logger
+
+        return getattr(app_logger, name)
+
+
+logger = _MoviePilotLogger()
 
 
 DEFAULT_EXPORT_DIR_STATUS_TIMEOUT_SECONDS = 900.0
@@ -708,6 +715,11 @@ def run_worker_with_watchdog(
     :raises TimeoutError: watchdog 超时
     :raises RuntimeError: 子进程失败或无结果退出
     """
+    if worker_target is export_dir_worker_main:
+        from .export_dir_process import run_export_process
+
+        return run_export_process(params, context, logger)
+
     result_queue: Queue = Queue(maxsize=1)
     process = Process(target=worker_target, args=(params, result_queue))
     started = False
