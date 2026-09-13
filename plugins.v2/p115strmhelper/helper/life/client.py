@@ -1297,9 +1297,7 @@ class MonitorLife:
                     return
                 related_entries_dup: List[Path] = []
                 if configer.monitor_life_rename_auto_related_files:
-                    for sibling in old_strm_path.parent.glob(f"{old_path.stem}*"):
-                        if sibling.suffix.lower() == ".strm" or not sibling.is_file():
-                            continue
+                    for sibling in PathRemoveUtils.iter_related_files(old_path):
                         related_entries_dup.append(sibling)
                 try:
                     old_strm_path.unlink(missing_ok=True)
@@ -1338,9 +1336,7 @@ class MonitorLife:
 
             related_entries: List[Path] = []
             if configer.monitor_life_rename_auto_related_files and not same_strm_path:
-                for sibling in old_strm_path.parent.glob(f"{old_path.stem}*"):
-                    if sibling.suffix.lower() == ".strm" or not sibling.is_file():
-                        continue
+                for sibling in PathRemoveUtils.iter_related_files(old_path):
                     related_entries.append(sibling)
 
             try:
@@ -1871,9 +1867,7 @@ class MonitorLife:
             )
 
         if configer.monitor_life_move_media_local_move_related_files:
-            for sibling in old_strm_path.parent.glob(f"{old_local_path.stem}*"):
-                if sibling.suffix.lower() == ".strm" or not sibling.is_file():
-                    continue
+            for sibling in PathRemoveUtils.iter_related_files(old_local_path):
                 target_sibling = new_strm_path.parent / sibling.name
                 if target_sibling.exists():
                     if files_equal(sibling, target_sibling, shallow=False):

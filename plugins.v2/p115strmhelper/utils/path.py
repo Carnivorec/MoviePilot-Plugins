@@ -259,16 +259,11 @@ class PathRemoveUtils:
                         logger.warn(f"{func_type}本地空目录 {parent_path} 已删除")
 
     @staticmethod
-    def clean_related_files(file_path: Path, func_type: str = None):
-        """
-        清理同一目录内以完整主文件名为前缀的关联媒体信息文件
-
-        前缀后必须为空或关联文件分隔符，保护相近名称文件、STRM 和真实媒体文件
-
-        :param file_path (Path): 基准文件路径
-        :param func_type (str): 日志输出函数名称
-        """
+    def iter_related_files(file_path: Path):
+        """按完整文件名前缀边界查找关联文件，保护 STRM 和真实媒体"""
         directory = file_path.parent
+        if not directory.is_dir():
+            return
         file_stem = file_path.stem
         protected_suffixes = {".strm"} | {
             f".{suffix.lstrip('.').lower()}" for suffix in settings.RMT_MEDIAEXT
@@ -285,5 +280,11 @@ class PathRemoveUtils:
                 )
                 and item_to_check.suffix.lower() not in protected_suffixes
             ):
-                logger.warn(f"{func_type}删除文件 {item_to_check}")
-                item_to_check.unlink(missing_ok=True)
+                yield item_to_check
+
+    @staticmethod
+    def clean_related_files(file_path: Path, func_type: str = None):
+        """清理同一目录内的关联媒体信息文件，保留相近名称和真实媒体"""
+        for item_to_check in PathRemoveUtils.iter_related_files(file_path):
+            logger.warn(f"{func_type}删除文件 {item_to_check}")
+            item_to_check.unlink(missing_ok=True)

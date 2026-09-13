@@ -1,6 +1,8 @@
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
-from tarfile import open as tarfile_open
+import re
+from tempfile import NamedTemporaryFile
 from threading import Event as ThreadEvent, Thread
 from time import perf_counter, sleep
 from typing import Deque, List, Optional, Tuple
@@ -15,6 +17,7 @@ from app.log import logger
 from ...core.config import configer
 from ...schemas.backup import BackupHistory, BackupTargetType, StrmBackupItem
 from ...utils.string import StringUtils
+from ...utils.backup_archive import backup_sources, backup_tar_writer, restore_backup_archive
 
 from .constants import BackupPhaseWeight, BackupProgress
 
@@ -311,7 +314,21 @@ class BackupStrmHelper:
 
         :return str: 安全前缀
         """
+        label = re.sub(r'[<>:"|?*\x00-\x1f]', "_", BackupStrmHelper._legacy_task_name(task_name))
+        label = label.encode("utf-8")[:120].decode("utf-8", errors="ignore")
+        return f"{label}_{sha256(task_name.encode('utf-8')).hexdigest()[:12]}"
+
+    @staticmethod
+    def _legacy_task_name(task_name: str) -> str:
         return task_name.replace("/", "_").replace("\\", "_").replace(" ", "_")
+
+    @staticmethod
+    def _matches_backup(filename: str, task_name: str, *, include_legacy: bool = False) -> bool:
+        """按完整任务前缀和时间戳识别文件，旧命名只用于列出，不自动清理"""
+        prefixes = [BackupStrmHelper._safe_task_name(task_name)]
+        if include_legacy:
+            prefixes.append(BackupStrmHelper._legacy_task_name(task_name))
+        return any(re.fullmatch(re.escape(prefix) + r"_\d{8}_\d{6}\.tar\.gz", filename) for prefix in prefixes)
 
     @staticmethod
     def _generate_filename(task_name: str) -> str:
@@ -338,19 +355,7 @@ class BackupStrmHelper:
 
         :return Tuple: (条目列表, 扫描耗时秒数)
         """
-        valid_sources: List[Path] = []
-        for source_path in source_paths:
-            source = Path(source_path)
-            if not source.exists():
-                logger.warning(f"【STRM备份】源目录不存在，跳过: {source_path}")
-                continue
-            if not source.is_dir():
-                logger.warning(f"【STRM备份】源路径不是目录，跳过: {source_path}")
-                continue
-            valid_sources.append(source)
-
-        if not valid_sources:
-            return [], 0.0
+        valid_sources = backup_sources(source_paths)
 
         scan_t0 = perf_counter()
         tracker = _BackupProgressTracker(
@@ -365,7 +370,7 @@ class BackupStrmHelper:
         source_count = len(valid_sources)
 
         for source_idx, source in enumerate(valid_sources):
-            arc_root = source.name
+            arc_root = f"source-{source_idx}"
             cls._log_backup_progress(
                 "扫描",
                 tracker.overall_ratio(source_idx / source_count),
@@ -376,12 +381,9 @@ class BackupStrmHelper:
             for path in source.rglob("*"):
                 if not path.is_file():
                     continue
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue
+                size = path.stat().st_size
                 rel = path.relative_to(source)
-                arcname = str(Path(arc_root) / rel)
+                arcname = (Path(arc_root) / rel).as_posix()
                 entries.append((path, arcname, size))
                 total_discovered_files += 1
                 total_discovered_bytes += size
@@ -440,6 +442,7 @@ class BackupStrmHelper:
         :return Tuple: (是否成功, 错误信息)
         """
         try:
+            backup_sources(source_paths, output_path)
             entries, _scan_elapsed = cls._collect_backup_entries(source_paths)
             total_files = len(entries)
             total_bytes = sum(size for _, _, size in entries)
@@ -447,7 +450,7 @@ class BackupStrmHelper:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             if total_files == 0:
-                with tarfile_open(output_path, "w:gz"):
+                with backup_tar_writer(output_path, source_paths):
                     pass
                 cls._log_backup_progress(
                     "打包", BackupPhaseWeight.PACK_START, "无文件可打包"
@@ -467,7 +470,7 @@ class BackupStrmHelper:
             processed_files = 0
             processed_bytes = 0
 
-            with tarfile_open(output_path, "w:gz") as tar:
+            with backup_tar_writer(output_path, source_paths) as tar:
                 for file_path, arcname, size in entries:
                     tar.add(file_path, arcname=arcname)
                     processed_files += 1
@@ -523,20 +526,18 @@ class BackupStrmHelper:
     @staticmethod
     def _extract_tar_gz(
         archive_path: Path,
-        target_dir: Path,
+        source_paths: List[str],
     ) -> Tuple[bool, Optional[str]]:
         """
         解压 tar.gz 文件到目标目录
 
         :param archive_path (Path): 备份文件路径
-        :param target_dir (Path): 解压目标目录
+        :param source_paths (List): 恢复目标目录列表
 
         :return Tuple: (是否成功, 错误信息)
         """
         try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            with tarfile_open(archive_path, "r:gz") as tar:
-                tar.extractall(path=target_dir, filter="data")
+            restore_backup_archive(archive_path, source_paths)
             return True, None
         except Exception as e:
             error_msg = f"解压 tar.gz 失败: {str(e)}"
@@ -558,13 +559,11 @@ class BackupStrmHelper:
 
         :return int: 删除的文件数量
         """
-        safe_name = BackupStrmHelper._safe_task_name(task_name)
-        prefix = f"{safe_name}_"
         backup_files = sorted(
             [
                 f
                 for f in backup_dir.iterdir()
-                if f.name.startswith(prefix) and f.name.endswith(".tar.gz")
+                if f.is_file() and BackupStrmHelper._matches_backup(f.name, task_name)
             ],
             key=lambda f: f.name,
             reverse=True,
@@ -837,13 +836,11 @@ class BackupStrmHelper:
                 return
 
             files = self._storage_chain.list_files(dir_item) or []
-            safe_name = BackupStrmHelper._safe_task_name(task_name)
-            prefix = f"{safe_name}_"
             backup_files = sorted(
                 [
                     f
                     for f in files
-                    if f.name.startswith(prefix) and f.name.endswith(".tar.gz")
+                    if f.type == "file" and BackupStrmHelper._matches_backup(f.name, task_name)
                 ],
                 key=lambda f: f.name,
                 reverse=True,
@@ -851,8 +848,10 @@ class BackupStrmHelper:
 
             for old_file in backup_files[retain_count:]:
                 try:
-                    self._storage_chain.delete_file(old_file)
-                    logger.info(f"【STRM备份】已删除云端旧备份: {old_file.name}")
+                    if self._storage_chain.delete_file(old_file):
+                        logger.info(f"【STRM备份】已删除云端旧备份: {old_file.name}")
+                    else:
+                        logger.warning(f"【STRM备份】云端旧备份删除未成功: {old_file.name}")
                 except Exception as e:
                     logger.error(
                         f"【STRM备份】删除云端旧备份失败: {old_file.name}, {str(e)}"
@@ -875,12 +874,10 @@ class BackupStrmHelper:
         if not backup_dir.exists():
             return []
 
-        safe_name = BackupStrmHelper._safe_task_name(task.name)
-        prefix = f"{safe_name}_"
         results = []
 
         for f in sorted(backup_dir.iterdir(), key=lambda x: x.name, reverse=True):
-            if f.name.startswith(prefix) and f.name.endswith(".tar.gz"):
+            if f.is_file() and self._matches_backup(f.name, task.name, include_legacy=True):
                 results.append(
                     BackupHistory(
                         task_name=task.name,
@@ -916,12 +913,10 @@ class BackupStrmHelper:
                 return []
 
             files = self._storage_chain.list_files(dir_item) or []
-            safe_name = BackupStrmHelper._safe_task_name(task.name)
-            prefix = f"{safe_name}_"
             results = []
 
             for f in files:
-                if f.name.startswith(prefix) and f.name.endswith(".tar.gz"):
+                if f.type == "file" and self._matches_backup(f.name, task.name, include_legacy=True):
                     results.append(
                         BackupHistory(
                             task_name=task.name,
@@ -947,7 +942,7 @@ class BackupStrmHelper:
         从本地备份恢复
 
         :param backup_path (str): 备份文件路径
-        :param source_paths (List): 恢复目标目录列表（取第一个的父目录作为解压根目录）
+        :param source_paths (List): 恢复目标目录列表
 
         :return Tuple: (是否成功, 错误信息)
         """
@@ -958,9 +953,7 @@ class BackupStrmHelper:
         if not source_paths:
             return False, "未指定恢复目标目录"
 
-        target_dir = Path(source_paths[0]).parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-        return BackupStrmHelper._extract_tar_gz(archive_path, target_dir)
+        return BackupStrmHelper._extract_tar_gz(archive_path, source_paths)
 
     def restore_from_cloud(
         self,
@@ -972,7 +965,7 @@ class BackupStrmHelper:
         从 115 网盘备份恢复
 
         :param cloud_path (str): 115 网盘备份文件路径
-        :param source_paths (List): 恢复目标目录列表（取第一个作为恢复根目录）
+        :param source_paths (List): 恢复目标目录列表
         :param client (P115Client): P115Client 实例
 
         :return Tuple: (是否成功, 错误信息)
@@ -983,6 +976,7 @@ class BackupStrmHelper:
         if not client:
             return False, "115 客户端未初始化"
 
+        temp_file = None
         try:
             target_file = Path(cloud_path)
             parent_path = target_file.parent
@@ -1010,7 +1004,8 @@ class BackupStrmHelper:
 
             temp_dir = configer.PLUGIN_TEMP_PATH / "restore"
             temp_dir.mkdir(parents=True, exist_ok=True)
-            temp_file = temp_dir / filename
+            with NamedTemporaryFile(dir=temp_dir, prefix=".p115-restore-", suffix=".tar.gz", delete=False) as file:
+                temp_file = Path(file.name)
 
             download_url = client.download_url(
                 pickcode, user_agent=configer.get_user_agent()
@@ -1024,15 +1019,17 @@ class BackupStrmHelper:
                             f.write(chunk)
             logger.info(f"【STRM备份】从 115 网盘下载备份文件成功: {cloud_path}")
 
-            target_dir = Path(source_paths[0]).parent
-            target_dir.mkdir(parents=True, exist_ok=True)
-            success, error_msg = self._extract_tar_gz(temp_file, target_dir)
-            temp_file.unlink(missing_ok=True)
-            return success, error_msg
+            return self._extract_tar_gz(temp_file, source_paths)
         except Exception as e:
             error_msg = f"从 115 网盘恢复失败: {str(e)}"
             logger.error(f"【STRM备份】{error_msg}", exc_info=True)
             return False, error_msg
+        finally:
+            if temp_file is not None:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except OSError as error:
+                    logger.warning(f"【STRM备份】恢复临时文件清理失败: {error}")
 
     def execute_backup(
         self,
