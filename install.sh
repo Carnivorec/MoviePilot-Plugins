@@ -552,39 +552,85 @@ check_scheduler_not_running() {
   fi
 }
 
+validate_container_repo_path() {
+  case "$CONTAINER_REPO_PATH" in
+    /*/*) ;;
+    *) fail "Container repository must be an absolute subdirectory" ;;
+  esac
+  case "$CONTAINER_REPO_PATH" in
+    /config|/config/temp|/config/plugins|/config/plugin_forks|/config/plugin_manual_backups|/config/temp/plugin_backup|/app/app|/app/app/plugins|/opt/venv|/var/lib|/usr/local)
+      fail "Refusing to replace a shared container directory: $CONTAINER_REPO_PATH" ;;
+  esac
+  docker exec -e REPO_PATH="$CONTAINER_REPO_PATH" "$CONTAINER_NAME" sh -lc '
+    set -eu
+    [ "$(readlink -m "$REPO_PATH")" = "$REPO_PATH" ] || exit 2
+    [ ! -L "$REPO_PATH" ] || exit 2
+    if [ -e "$REPO_PATH" ]; then
+      [ -d "$REPO_PATH" ] || exit 2
+      if [ -n "$(find "$REPO_PATH" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        [ -f "$REPO_PATH/package.v2.json" ] && [ -d "$REPO_PATH/plugins.v2" ] || exit 2
+      fi
+    fi
+  ' || fail "Unsafe or unmanaged container repository: $CONTAINER_REPO_PATH"
+}
+
 stage_repo() {
+  local pid="$1" lower
+  lower="$(plugin_lower_for "$pid")"
   log "Staging local repo to $CONTAINER_NAME:$CONTAINER_REPO_PATH"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "Dry run: skip staging"
     return 0
   fi
+  validate_container_repo_path
 
   tar -C "$REPO_DIR" \
     --exclude='.git' \
     --exclude='frontend' \
     --exclude='dev' \
     --exclude='docs/superpowers' \
-    -cf - package.v2.json plugins.v2 | \
+    --exclude='.venv' --exclude='__pycache__' --exclude='*.pyc' \
+    --exclude='.env' --exclude='install_config.env' \
+    -cf - package.v2.json "plugins.v2/$lower" | \
     docker exec -i \
+      -e PID="$pid" -e PLUGIN_LOWER="$lower" \
       -e CONTAINER_REPO_PATH="$CONTAINER_REPO_PATH" \
       "$CONTAINER_NAME" sh -lc '
         set -eu
-        tmp="${CONTAINER_REPO_PATH}.tmp"
         parent="$(dirname "$CONTAINER_REPO_PATH")"
         mkdir -p "$parent"
-        rm -rf "$tmp"
-        mkdir -p "$tmp"
+        tmp="$(mktemp -d "${CONTAINER_REPO_PATH}.tmp.XXXXXX")"
+        trap '\''[ ! -d "$tmp" ] || rm -rf -- "$tmp"'\'' EXIT
         tar -xf - -C "$tmp"
         test -f "$tmp/package.v2.json"
-        test -f "$tmp/plugins.v2/p115strmhelper/__init__.py"
-        test -f "$tmp/plugins.v2/p115disk/__init__.py"
-        jq "{P115Disk: .P115Disk, P115StrmHelper: .P115StrmHelper}" \
+        test -f "$tmp/plugins.v2/$PLUGIN_LOWER/__init__.py"
+        jq --arg pid "$PID" '\''{($pid): .[$pid]}'\'' \
           "$tmp/package.v2.json" > "$tmp/package.v2.json.filtered"
+        if [ -f "$CONTAINER_REPO_PATH/package.v2.json" ]; then
+          for other in p115disk p115strmhelper; do
+            [ "$other" != "$PLUGIN_LOWER" ] || continue
+            [ ! -d "$CONTAINER_REPO_PATH/plugins.v2/$other" ] || \
+              cp -a "$CONTAINER_REPO_PATH/plugins.v2/$other" "$tmp/plugins.v2/$other"
+          done
+          jq -s --arg pid "$PID" '\''
+            (.[0] | {P115Disk, P115StrmHelper} | with_entries(select(.value != null))) + .[1]
+          '\'' "$CONTAINER_REPO_PATH/package.v2.json" "$tmp/package.v2.json.filtered" > "$tmp/merged.json"
+          mv "$tmp/merged.json" "$tmp/package.v2.json.filtered"
+        fi
         jq -e "all(.[]; type == \"object\" and (.version | type == \"string\"))" \
           "$tmp/package.v2.json.filtered" >/dev/null
         mv "$tmp/package.v2.json.filtered" "$tmp/package.v2.json"
-        rm -rf "$CONTAINER_REPO_PATH"
-        mv "$tmp" "$CONTAINER_REPO_PATH"
+        previous=""
+        if [ -d "$CONTAINER_REPO_PATH" ]; then
+          previous="$(mktemp -d "${CONTAINER_REPO_PATH}.previous.XXXXXX")"
+          rmdir "$previous"
+          mv "$CONTAINER_REPO_PATH" "$previous"
+        fi
+        if ! mv "$tmp" "$CONTAINER_REPO_PATH"; then
+          [ -z "$previous" ] || mv "$previous" "$CONTAINER_REPO_PATH"
+          exit 1
+        fi
+        [ -z "$previous" ] || rm -rf -- "$previous"
       '
 }
 
@@ -596,11 +642,14 @@ make_manual_backup() {
   log "Creating manual backup for $pid: $ts"
   docker exec \
     -e PLUGIN_LOWER="$lower" \
+    -e PID="$pid" \
+    -e CONTAINER_REPO_PATH="$CONTAINER_REPO_PATH" \
     -e TS="$ts" \
     "$CONTAINER_NAME" sh -lc '
       set -eu
       base="/config/plugin_manual_backups/$PLUGIN_LOWER"
-      backup="$base/$TS"
+      mkdir -p "$base"
+      backup="$(mktemp -d "$base/${TS}-XXXXXX")"
       runtime="/app/app/plugins/$PLUGIN_LOWER"
       persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
       mkdir -p "$backup"
@@ -612,8 +661,13 @@ make_manual_backup() {
         mkdir -p "$backup/persistent"
         cp -a "$persistent/." "$backup/persistent/"
       fi
-      rm -f "$base/latest"
-      ln -s "$backup" "$base/latest"
+      if [ -f "$CONTAINER_REPO_PATH/package.v2.json" ]; then
+        jq --arg pid "$PID" '\''.[$pid] // empty'\'' \
+          "$CONTAINER_REPO_PATH/package.v2.json" > "$backup/catalog_entry.json"
+      fi
+      [ ! -e "$base/latest" ] || [ -L "$base/latest" ] || exit 2
+      ln -s "$backup" "$base/.latest-$$"
+      mv -Tf "$base/.latest-$$" "$base/latest"
       printf "%s\n" "$backup"
     '
 }
@@ -621,7 +675,7 @@ make_manual_backup() {
 install_with_plugin_helper() {
   local pid="$1"
   local repo_url
-  repo_url="local://$pid?path=$CONTAINER_REPO_PATH&version=$PACKAGE_VERSION"
+  repo_url="local://$pid?path=$(printf '%s' "$CONTAINER_REPO_PATH" | jq -sRr @uri)&version=$PACKAGE_VERSION"
   log "Installing $pid using PluginHelper.install_local"
   docker exec -i \
     -e PID="$pid" \
@@ -675,7 +729,8 @@ copy_only_install() {
       mkdir -p "$(dirname "$runtime")"
       cp -a "$tmp" "$runtime"
       if [ -f "$runtime/requirements.txt" ]; then
-        /opt/venv/bin/python -m pip install -r "$runtime/requirements.txt"
+        . /opt/venv/bin/activate
+        uv pip install --python /opt/venv/bin/python --find-links "$runtime" -r "$runtime/requirements.txt"
       fi
       rm -rf "$persistent"
       mkdir -p "$(dirname "$persistent")"
@@ -736,17 +791,40 @@ sync_persistent_backup_from_runtime() {
 
 rollback_latest() {
   local pid="$1"
-  local lower
+  local lower rollback_version
   lower="$(plugin_lower_for "$pid")"
+  validate_container_repo_path
+  rollback_version="$(container_version_for "$pid" "/config/plugin_manual_backups/$lower/latest/runtime")" \
+    || fail "Cannot read backup version for $pid"
+  [[ -n "$rollback_version" ]] || fail "Backup version is empty for $pid"
   log "Rolling back $pid from latest manual backup"
   docker exec \
     -e PLUGIN_LOWER="$lower" \
+    -e PID="$pid" \
+    -e ROLLBACK_VERSION="$rollback_version" \
+    -e CONTAINER_REPO_PATH="$CONTAINER_REPO_PATH" \
     "$CONTAINER_NAME" sh -lc '
       set -eu
       latest="/config/plugin_manual_backups/$PLUGIN_LOWER/latest"
       [ -e "$latest" ] || { echo "latest backup not found" >&2; exit 1; }
       backup="$(readlink -f "$latest")"
+      base="$(readlink -f "/config/plugin_manual_backups/$PLUGIN_LOWER")"
+      case "$backup" in "$base"/*) ;; *) echo "backup escapes plugin backup directory" >&2; exit 2 ;; esac
       [ -d "$backup/runtime" ] || { echo "runtime backup not found: $backup" >&2; exit 1; }
+      [ -f "$backup/runtime/__init__.py" ] || exit 2
+      catalog="$CONTAINER_REPO_PATH/package.v2.json"
+      [ -f "$catalog" ] || { echo "persistent local catalog not found" >&2; exit 2; }
+      entry="$backup/catalog_entry.json"
+      if [ ! -s "$entry" ]; then
+        entry="$(mktemp)"
+        jq --arg pid "$PID" '\''.[$pid]'\'' "$catalog" > "$entry"
+      fi
+      catalog_tmp="$(mktemp "$CONTAINER_REPO_PATH/.catalog-rollback.XXXXXX")"
+      jq --arg pid "$PID" --arg version "$ROLLBACK_VERSION" --slurpfile entry "$entry" '\''
+        .[$pid] = ($entry[0] | .version = $version |
+          .history = {($version): (.history[$version] // "Restored local backup")})
+      '\'' "$catalog" > "$catalog_tmp"
+      jq -e --arg pid "$PID" '\''.[$pid] | type == "object" and (.version | type == "string")'\'' "$catalog_tmp" >/dev/null
       runtime="/app/app/plugins/$PLUGIN_LOWER"
       persistent="/config/temp/plugin_backup/$PLUGIN_LOWER"
       rm -rf "$runtime"
@@ -761,10 +839,29 @@ rollback_latest() {
         mkdir -p "$(dirname "$persistent")"
         cp -a "$runtime" "$persistent"
       fi
+      local_source="$CONTAINER_REPO_PATH/plugins.v2/$PLUGIN_LOWER"
+      rm -rf -- "$local_source"
+      mkdir -p "$(dirname "$local_source")"
+      cp -a "$runtime" "$local_source"
+      mv "$catalog_tmp" "$catalog"
+      [ "$entry" = "$backup/catalog_entry.json" ] || rm -f -- "$entry"
       printf "%s\n" "$backup"
-    '
+    ' || return $?
   reload_plugin "$pid"
   verify_plugin_consistent "$pid"
+}
+
+rollback_on_install_error() {
+  local pid="$1" status="$2" rollback_status
+  trap - ERR
+  set +e
+  log "Installation failed; restoring the saved runtime and persistent source for $pid"
+  (set -e; rollback_latest "$pid")
+  rollback_status=$?
+  if [[ "$rollback_status" -ne 0 ]]; then
+    log "Automatic rollback failed; keep the manual backup for recovery"
+  fi
+  exit "$status"
 }
 
 container_version_for() {
@@ -828,6 +925,7 @@ verify_plugin() {
   backup_version="$(container_version_for "$pid" "$backup_base")" || fail "Cannot read persistent backup version for $pid"
   [[ "$backup_version" == "$expected" ]] || fail "Persistent backup version mismatch for $pid: expected=$expected actual=$backup_version"
   log "version ok: $pid $expected"
+  verify_persistent_source "$pid" "$expected"
   verify_static_assets "$pid"
   verify_schedule_jobs "$pid"
 }
@@ -842,8 +940,22 @@ verify_plugin_consistent() {
   backup_version="$(container_version_for "$pid" "$backup_base")" || fail "Cannot read persistent backup version for $pid"
   [[ "$runtime_version" == "$backup_version" ]] || fail "Rollback version mismatch for $pid: runtime=$runtime_version backup=$backup_version"
   log "rollback version ok: $pid $runtime_version"
+  verify_persistent_source "$pid" "$runtime_version"
   verify_static_assets "$pid"
   verify_schedule_jobs "$pid"
+}
+
+verify_persistent_source() {
+  local pid="$1" expected="$2" lower source_version catalog_version
+  lower="$(plugin_lower_for "$pid")"
+  source_version="$(container_version_for "$pid" "$CONTAINER_REPO_PATH/plugins.v2/$lower")" \
+    || fail "Cannot read persistent source version for $pid"
+  catalog_version="$(docker exec -e PID="$pid" -e REPO_PATH="$CONTAINER_REPO_PATH" \
+    "$CONTAINER_NAME" sh -lc 'jq -er --arg pid "$PID" '\''.[$pid].version'\'' "$REPO_PATH/package.v2.json"')" \
+    || fail "Cannot read persistent catalog version for $pid"
+  [[ "$source_version" == "$expected" && "$catalog_version" == "$expected" ]] \
+    || fail "Persistent source/catalog version mismatch for $pid"
+  log "persistent source/catalog ok: $pid $expected"
 }
 
 print_plan_for_plugin() {
@@ -875,14 +987,18 @@ process_plugin() {
   fi
 
   if [[ -n "$ROLLBACK_MODE" ]]; then
+    check_scheduler_not_running "$pid"
     rollback_latest "$pid"
     return 0
   fi
 
   check_scheduler_not_running "$pid"
   build_frontend_assets_if_needed "$pid"
-  stage_repo
+  validate_container_repo_path
   make_manual_backup "$pid"
+  (
+  trap 'install_status=$?; if [[ "$install_status" -ne 0 ]]; then rollback_on_install_error "$pid" "$install_status"; fi' EXIT
+  stage_repo "$pid"
   if [[ "$COPY_ONLY" -eq 1 ]]; then
     copy_only_install "$pid"
   else
@@ -892,12 +1008,15 @@ process_plugin() {
   sync_persistent_backup_from_runtime "$pid"
   reload_plugin "$pid"
   verify_plugin "$pid"
+  trap - EXIT
+  )
 }
 
 main() {
   require_cmd git
 
   parse_args "$@"
+  [[ "$PACKAGE_VERSION" == "v2" ]] || fail "Only PACKAGE_VERSION=v2 is supported"
   check_repo
 
   local targets_text
@@ -921,4 +1040,6 @@ main() {
   done
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
