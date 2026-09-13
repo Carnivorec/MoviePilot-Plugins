@@ -27,7 +27,7 @@ class P115Disk(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "99.0.2.32"
+    plugin_version = "99.0.2.32.1"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -682,11 +682,13 @@ class P115Disk(_PluginBase):
             return None
 
         files_info = {}
+        scan_failed = False
 
         def __snapshot_file(_fileitm: FileItem, current_depth: int = 0):
             """
             递归获取文件信息
             """
+            nonlocal scan_failed
             try:
                 if _fileitm.type == "dir":
                     if current_depth >= max_depth:
@@ -700,27 +702,33 @@ class P115Disk(_PluginBase):
                     ):
                         return
 
-                    sub_files = self._p115_api.list(_fileitm)
+                    sub_files = self._p115_api.list(_fileitm, strict=True)
                     for sub_file in sub_files:
                         __snapshot_file(sub_file, current_depth + 1)
                 else:
-                    if getattr(_fileitm, "modify_time", 0) > last_snapshot_time:
+                    modified_at = getattr(_fileitm, "modify_time", None)
+                    if last_snapshot_time is None or modified_at is None or modified_at > last_snapshot_time:
                         files_info[_fileitm.path] = {
                             "size": _fileitm.size or 0,
-                            "modify_time": getattr(_fileitm, "modify_time", 0),
+                            "modify_time": modified_at or 0,
                             "type": _fileitm.type,
                         }
 
             except Exception as e:
-                logger.debug(f"Snapshot error for {_fileitm.path}: {e}")
+                scan_failed = True
+                logger.warning(f"【P115Disk】快照目录读取失败: {_fileitm.path}: {e}")
 
-        fileitem = self._p115_api.get_item(path)
+        try:
+            fileitem = self._p115_api.get_item_strict(path)
+        except Exception as e:
+            logger.warning(f"【P115Disk】快照入口查询失败: {path}: {e}")
+            return None
         if not fileitem:
             return {}
 
         __snapshot_file(fileitem)
 
-        return files_info
+        return None if scan_failed else files_info
 
     def storage_usage(self, storage: str) -> Optional[StorageUsage]:
         """

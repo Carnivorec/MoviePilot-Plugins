@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from time import monotonic, sleep, time
 from typing import Dict, List, Optional, Tuple
 
@@ -177,12 +178,14 @@ class P115Api:
         except Exception as e:
             logger.warn(f"【P115Disk】递归遍历文件夹失败: {str(e)}")
             return None
+        return items
 
-    def list(self, fileitem: FileItem) -> List[FileItem]:
+    def list(self, fileitem: FileItem, *, strict: bool = False) -> List[FileItem]:
         """
         浏览文件或目录
 
         :param fileitem (FileItem): 文件项，可以是文件或目录
+        :param strict (bool): 无法确认完整列表时抛出异常，供快照等调用使用
 
         :return List: 文件项列表，如果是文件则返回包含该文件的列表，如果是目录则返回目录下的所有文件和子目录
         """
@@ -260,7 +263,7 @@ class P115Api:
                 fallback_items = storage_chain.list_files(
                     fileitem=fileitem, recursion=False
                 )
-                if fallback_items:
+                if fallback_items is not None:
                     result_items = []
                     for item in fallback_items:
                         if item.fileid:
@@ -284,8 +287,10 @@ class P115Api:
                         )
                         result_items.append(result_item)
                     return result_items
-            except Exception as e:
-                logger.error(f"【P115Disk】获取信息失败（原版）: {str(e)}")
+            except Exception as fallback_error:
+                logger.error(f"【P115Disk】获取信息失败（原版）: {fallback_error}")
+            if strict:
+                raise StorageQueryError(f"【P115Disk】无法完整读取目录: {fileitem.path}") from e
             return items
         return items
 
@@ -503,7 +508,12 @@ class P115Api:
             return None
 
         item = self._id_item_cache.get_item(file_id)
-        if not item:
+        if (
+            not isinstance(item, dict)
+            or str(item.get("id")) != str(file_id)
+            or not isinstance(item.get("path"), str)
+            or Path(item["path"]) != path
+        ):
             return None
 
         self._get_item_fail_records.pop(path_str, None)
@@ -726,39 +736,43 @@ class P115Api:
 
         :return Path: 下载成功返回本地文件路径，失败返回 None
         """
-        detail = self.get_item(Path(fileitem.path))
-        if not detail:
-            logger.error(f"【P115Disk】获取文件详情失败: {fileitem.name}")
-            return None
-
-        download_url = self.client.download_url(
-            detail.pickcode, user_agent=settings.USER_AGENT
-        ).geturl()
-        if not download_url:
-            logger.error(f"【P115Disk】下载链接为空: {fileitem.name}")
+        if (
+            not isinstance(fileitem.name, str)
+            or fileitem.name in ("", ".", "..")
+            or Path(fileitem.name).name != fileitem.name
+        ):
+            logger.error("【P115Disk】下载文件名必须是单个文件名")
             return None
 
         local_path = (path or settings.TEMP_PATH) / fileitem.name
-
-        # 获取文件大小
-        file_size = detail.size
-
-        # 初始化进度条
-        logger.info(f"【P115Disk】开始下载: {fileitem.name} -> {local_path}")
-        progress_callback = transfer_process(Path(fileitem.path).as_posix())
-
+        temporary_path = None
         try:
-            with stream(
-                "GET", download_url, headers={"user-agent": settings.USER_AGENT}
-            ) as r:
-                r.raise_for_status()
-                downloaded_size = 0
-
-                with open(local_path, "wb") as f:
+            detail = self.get_item(Path(fileitem.path))
+            if not detail:
+                logger.error(f"【P115Disk】获取文件详情失败: {fileitem.name}")
+                return None
+            download_url = self.client.download_url(
+                detail.pickcode, user_agent=settings.USER_AGENT
+            ).geturl()
+            if not download_url:
+                logger.error(f"【P115Disk】下载链接为空: {fileitem.name}")
+                return None
+            file_size = detail.size
+            progress_callback = transfer_process(Path(fileitem.path).as_posix())
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"【P115Disk】开始下载: {fileitem.name} -> {local_path}")
+            with NamedTemporaryFile(
+                mode="wb", dir=local_path.parent, prefix=".p115-", suffix=".part", delete=False
+            ) as f:
+                temporary_path = Path(f.name)
+                with stream(
+                    "GET", download_url, headers={"user-agent": settings.USER_AGENT}
+                ) as r:
+                    r.raise_for_status()
+                    downloaded_size = 0
                     for chunk in r.iter_bytes(chunk_size=10 * 1024 * 1024):
                         if global_vars.is_transfer_stopped(fileitem.path):
                             logger.info(f"【P115Disk】{fileitem.path} 下载已取消！")
-                            r.close()
                             return None
                         f.write(chunk)
                         downloaded_size += len(chunk)
@@ -766,21 +780,22 @@ class P115Api:
                             progress = (downloaded_size * 100) / file_size
                             progress_callback(progress)
 
-                # 完成下载
-                progress_callback(100)
-                logger.info(f"【P115Disk】下载完成: {fileitem.name}")
+            temporary_path.replace(local_path)
+            progress_callback(100)
+            logger.info(f"【P115Disk】下载完成: {fileitem.name}")
+            return local_path
         except RequestError as e:
             logger.error(f"【P115Disk】下载网络错误: {fileitem.name} - {str(e)}")
-            if local_path.exists():
-                local_path.unlink()
             return None
         except Exception as e:
             logger.error(f"【P115Disk】下载失败: {fileitem.name} - {str(e)}")
-            if local_path.exists():
-                local_path.unlink()
             return None
-
-        return local_path
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.warning(f"【P115Disk】清理下载临时文件失败: {e}")
 
     @staticmethod
     def _calc_sha1(filepath: Path, size: Optional[int] = None) -> str:
