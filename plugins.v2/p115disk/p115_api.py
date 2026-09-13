@@ -968,7 +968,7 @@ class P115Api:
                 progress_callback(100)
                 return self.get_item(target_path)
 
-            logger.debug(f"【P115Disk】上传初始化结果: {init_resp}")
+            logger.debug("【P115Disk】上传初始化响应已获取")
 
             # 获取上传信息
             bucket_name = init_resp.get("bucket")
@@ -976,7 +976,7 @@ class P115Api:
             callback_info = init_resp.get("callback")
 
             if not all([bucket_name, object_name, callback_info]):
-                logger.error(f"【P115Disk】上传信息不完整: {init_resp}")
+                logger.error("【P115Disk】上传信息不完整")
                 return None
 
             # Step 2: 获取OSS上传凭证

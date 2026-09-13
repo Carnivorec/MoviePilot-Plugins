@@ -95,7 +95,7 @@ class MediaInfoDownloader:
 
         self._batch_lock = Lock()
 
-        logger.debug(f"【媒体信息文件下载】初始化请求头：{self.headers}")
+        logger.debug(f"【媒体信息文件下载】请求头已初始化，Cookie 已配置: {bool(self.cookie)}")
 
     def __del__(self):
         self.oof_fast_mi_cacher.close()

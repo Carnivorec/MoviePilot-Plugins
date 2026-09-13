@@ -232,7 +232,7 @@ class P115DiskCore:
                 if init_resp is None:
                     return None
 
-                logger.debug(f"【P115Disk】上传初始化结果: {init_resp}")
+                logger.debug("【P115Disk】上传初始化响应已获取")
 
                 if not init_resp.get("state"):
                     logger.error(
@@ -368,7 +368,7 @@ class P115DiskCore:
             callback_info = init_resp.get("callback")
 
             if not all([bucket_name, object_name, callback_info]):
-                logger.error(f"【P115Disk】上传信息不完整: {init_resp}")
+                logger.error("【P115Disk】上传信息不完整")
                 return None
 
             # Step 2: 获取OSS上传凭证

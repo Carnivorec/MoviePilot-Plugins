@@ -464,7 +464,7 @@ class U115OpenHelper:
                 return None
             # 结果
             init_result = init_resp.get("data")
-            logger.debug(f"【P115Open】上传 Step 1 初始化结果: {init_result}")
+            logger.debug("【P115Open】上传 Step 1 初始化响应已获取")
             # 回调信息
             bucket_name = init_result.get("bucket")
             object_name = init_result.get("object")
@@ -509,7 +509,7 @@ class U115OpenHelper:
                     return None
                 # 二次认证结果
                 init_result = init_resp.get("data")
-                logger.debug(f"【P115Open】上传 Step 2 二次认证结果: {init_result}")
+                logger.debug("【P115Open】上传 Step 2 二次认证响应已获取")
                 if not pick_code:
                     pick_code = init_result.get("pick_code")
                 if not bucket_name:
@@ -687,7 +687,7 @@ class U115OpenHelper:
         if not token_resp:
             logger.warn("【P115Open】获取上传凭证失败")
             return None
-        logger.debug(f"【P115Open】上传 Step 4 获取上传凭证结果: {token_resp}")
+        logger.debug("【P115Open】上传 Step 4 上传凭证已获取")
         # 上传凭证
         endpoint = token_resp.get("endpoint")
         access_key_id = token_resp.get("AccessKeyId")
@@ -708,7 +708,7 @@ class U115OpenHelper:
             timeout=120.0,
         )
         if resume_resp:
-            logger.debug(f"【P115Open】上传 Step 5 断点续传结果: {resume_resp}")
+            logger.debug("【P115Open】上传 Step 5 断点续传响应已获取")
             if resume_resp.get("callback"):
                 callback = resume_resp["callback"]
 
