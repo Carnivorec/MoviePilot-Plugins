@@ -110,6 +110,8 @@ class IncrementSyncStrmHelper:
         self.elapsed_time = 0.0
         self.strm_exec_history_kind: Optional[str] = None
         self.strm_fail_dict: Dict[str, str] = {}
+        self.sync_failures: Dict[str, str] = {}
+        self._local_scan_error: Optional[Exception] = None
         self.mediainfo_fail_dict: List = []
         self._iterdir_app_cycle = cycle([False, True])
 
@@ -347,6 +349,7 @@ class IncrementSyncStrmHelper:
         """
         self.local_tree.clear()
         self.local_strm_tree.clear()
+        self._local_scan_error = None
 
         def background_task(_target_dir):
             """
@@ -371,6 +374,7 @@ class IncrementSyncStrmHelper:
                     )
                 logger.info(f"【增量STRM生成】扫描本地媒体库文件完成: {_target_dir}")
             except Exception as e:
+                self._local_scan_error = e
                 sentry_manager.sentry_hub.capture_exception(e)
                 logger.error(
                     f"【增量STRM生成】扫描本地媒体库文件 {_target_dir} 错误: {e}"
@@ -384,16 +388,20 @@ class IncrementSyncStrmHelper:
 
         return local_tree_task_thread
 
-    @staticmethod
-    def __wait_generate_local_tree(thread):
+    def __wait_generate_local_tree(self, thread):
         """
         等待生成本地目录树运行完成
 
         :param thread (Thread): 本地目录树线程
         """
         while thread.is_alive():
-            logger.info("【增量STRM生成】扫描本地媒体库运行中...")
-            sleep(10)
+            thread.join(timeout=10)
+            if thread.is_alive():
+                logger.info("【增量STRM生成】扫描本地媒体库运行中...")
+        if self._local_scan_error is not None:
+            raise ItertreeInternalError(
+                f"本地目录树扫描失败: {self._local_scan_error}"
+            ) from self._local_scan_error
 
     def __generate_pan_tree(self, pan_media_dir: str, target_dir: str):
         """
@@ -760,6 +768,7 @@ class IncrementSyncStrmHelper:
                         (path.strip(), 0) for path in lst
                     )
                 except Exception as e:
+                    self.sync_failures["二级目录扫描"] = str(e)
                     logger.error(f"【增量STRM生成】构建目录列表出错: {e}")
                     return
             else:
@@ -771,10 +780,15 @@ class IncrementSyncStrmHelper:
                 if retry_count > 2:
                     continue
                 parts = path.split("#", 1)
+                if len(parts) != 2 or not all(part.strip() for part in parts):
+                    self.sync_failures[path] = "路径配置格式错误，应为 本地目录#网盘目录"
+                    logger.error(f"【增量STRM生成】{self.sync_failures[path]}: {path}")
+                    continue
                 target_dir = parts[0].strip()
                 pan_media_dir = parts[1].strip()
 
                 if pan_media_dir == "/" or target_dir == "/":
+                    self.sync_failures[path] = "网盘目录或本地生成目录不能为根目录"
                     logger.error(
                         f"【增量STRM生成】网盘目录或本地生成目录不能为根目录: {path}"
                     )
@@ -789,19 +803,19 @@ class IncrementSyncStrmHelper:
                         target_dir=target_dir
                     )
 
-                    # 生成网盘目录树文件
-                    self.__generate_pan_tree(
-                        pan_media_dir=pan_media_dir, target_dir=target_dir
-                    )
-
-                    # 等待生成本地目录树运行完成
-                    self.__wait_generate_local_tree(local_tree_task_thread)
+                    try:
+                        self.__generate_pan_tree(
+                            pan_media_dir=pan_media_dir, target_dir=target_dir
+                        )
+                    finally:
+                        # 下一路径复用本实例的树，网盘失败时也必须等本地扫描退出
+                        self.__wait_generate_local_tree(local_tree_task_thread)
 
                     if (
                         not self.pan_to_local_tree_path.exists()
                         or not self.local_tree_path.exists()
                     ) and settings.CACHE_BACKEND_TYPE != "redis":
-                        logger.error(f"【增量STRM生成】{path} 目录树生成错误")
+                        raise ItertreeInternalError(f"{path} 目录树生成错误")
                     else:
                         # 生成或者下载文件
                         self._generate_additions()
@@ -891,6 +905,7 @@ class IncrementSyncStrmHelper:
                                         ):
                                             self.__remove_unless_strm_path(remove_path)
                                 except Exception as e:
+                                    self.sync_failures[f"{path}（清理）"] = str(e)
                                     sentry_manager.sentry_hub.capture_exception(e)
                                     logger.error(
                                         f"【增量STRM生成】清理无效 STRM 文件失败: {e}"
@@ -907,10 +922,12 @@ class IncrementSyncStrmHelper:
                             f"【增量STRM生成】目录同步错误，已加入队尾重试（剩余重试次数 {2 - retry_count}）: {path}，错误: {e}"
                         )
                     else:
+                        self.sync_failures[path] = str(e)
                         logger.error(
                             f"【增量STRM生成】目录同步错误，已达重试上限: {path}，错误: {e}"
                         )
                 except Exception as e:
+                    self.sync_failures[path] = str(e)
                     sentry_manager.sentry_hub.capture_exception(e)
                     logger.error(f"【增量STRM生成】增量同步 STRM 文件失败: {e}")
                     return
@@ -935,9 +952,12 @@ class IncrementSyncStrmHelper:
             if self.mediainfo_fail_dict:
                 for path in self.mediainfo_fail_dict:
                     logger.warn(f"【增量STRM生成】{path} 下载错误")
-            logger.info(
-                f"【增量STRM生成】增量生成 STRM 文件完成，总共生成 {self.strm_count} 个 STRM 文件，下载 {self.mediainfo_count} 个媒体数据文件"
-            )
+            if sync_error := self.get_sync_error():
+                logger.error(f"【增量STRM生成】增量同步未全部完成: {sync_error}")
+            else:
+                logger.info(
+                    f"【增量STRM生成】增量生成 STRM 文件完成，总共生成 {self.strm_count} 个 STRM 文件，下载 {self.mediainfo_count} 个媒体数据文件"
+                )
             if self.strm_fail_count != 0 or self.mediainfo_fail_count != 0:
                 logger.warn(
                     f"【增量STRM生成】{self.strm_fail_count} 个 STRM 文件生成失败，{self.mediainfo_fail_count} 个媒体数据文件下载失败"
@@ -947,8 +967,29 @@ class IncrementSyncStrmHelper:
                     f"【增量STRM生成】清理 {self.remove_unless_strm_count} 个失效 STRM 文件"
                 )
             logger.info(f"【增量STRM生成】API 请求次数 {self.api_count} 次")
+        except Exception as e:
+            self.sync_failures["任务异常"] = str(e)
+            raise
         finally:
             self.elapsed_time = perf_counter() - t0
+
+    def get_sync_error(self) -> Optional[str]:
+        """
+        返回本轮最终失败摘要，已成功重试的目录不计入失败
+
+        :return str: 存在失败时的摘要，全部成功时返回 None
+        """
+        errors = []
+        if self.sync_failures:
+            details = "；".join(
+                f"{path}: {error}" for path, error in list(self.sync_failures.items())[:5]
+            )
+            errors.append(f"目录/任务失败 {len(self.sync_failures)} 项（{details}）")
+        if self.strm_fail_count:
+            errors.append(f"STRM 生成失败 {self.strm_fail_count} 个")
+        if self.mediainfo_fail_count:
+            errors.append(f"媒体文件下载失败 {self.mediainfo_fail_count} 个")
+        return "；".join(errors) or None
 
     def get_generate_total(self):
         """
@@ -963,15 +1004,18 @@ class IncrementSyncStrmHelper:
         )
         kind = self.strm_exec_history_kind
         if kind:
+            sync_error = self.get_sync_error()
             StrmExecHistoryManager.append_run(
                 kind=kind,
-                success=True,
+                success=sync_error is None,
+                error=sync_error,
                 stats={
                     "strm_count": self.strm_count,
                     "mediainfo_count": self.mediainfo_count,
                     "strm_fail_count": self.strm_fail_count,
                     "mediainfo_fail_count": self.mediainfo_fail_count,
                     "remove_unless_strm_count": self.remove_unless_strm_count,
+                    "directory_fail_count": len(self.sync_failures),
                 },
                 elapsed_sec=float(self.elapsed_time),
                 total_iterated=int(self.total_iterated),
