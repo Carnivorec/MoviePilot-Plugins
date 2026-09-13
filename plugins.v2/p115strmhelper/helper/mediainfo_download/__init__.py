@@ -1,5 +1,6 @@
 from asyncio import Semaphore, gather, run as asyncio_run, sleep as asyncio_sleep
 from base64 import b64decode
+from contextlib import contextmanager
 from itertools import batched
 from pathlib import Path
 from threading import Lock
@@ -172,11 +173,13 @@ class MediaInfoDownloader:
             return None
         return Url.of(data["url"], data)
 
-    def _batch_fs_delete(self, scids: List) -> None:
+    def _batch_fs_delete(self, scids: List) -> bool:
         """
         对一批 scid 执行 fs_delete，使用 check_response 校验结果，最多重试 3 次
 
         :param scids (List): 待删除的文件夹 id 列表（≤ 50 个）
+
+        :return bool: 删除成功返回 True，重试耗尽返回 False
         """
         for attempt in range(3):
             try:
@@ -184,7 +187,8 @@ class MediaInfoDownloader:
                     scids, **configer.get_ios_ua_app(app=False)
                 )
                 check_response(resp)
-                return
+                logger.info(f"【媒体信息文件下载】临时目录清理成功，scids={scids}")
+                return True
             except Exception as e:
                 logger.warning(
                     f"【媒体信息文件下载】批量删除临时目录失败 "
@@ -195,6 +199,7 @@ class MediaInfoDownloader:
         logger.error(
             f"【媒体信息文件下载】批量删除临时目录在 3 次尝试后仍失败，scids={scids}"
         )
+        return False
 
     def _flush_pending_deletes(self, *, force: bool = False) -> None:
         """
@@ -204,8 +209,26 @@ class MediaInfoDownloader:
         """
         while len(self._pending_delete_scids) >= (1 if force else 50):
             batch = self._pending_delete_scids[:50]
+            if not self._batch_fs_delete(batch):
+                break
             self._pending_delete_scids = self._pending_delete_scids[50:]
-            self._batch_fs_delete(batch)
+
+    @contextmanager
+    def _batch_download_session(self) -> Generator:
+        """
+        隔离批次统计与停止状态，并确保异常退出时清理临时目录
+
+        删除失败的目录保留到下一批次重试，不在批次开始时丢弃
+        """
+        with self._batch_lock:
+            self.stop_all_flag = False
+            self.mediainfo_count = 0
+            self.mediainfo_fail_count = 0
+            self.mediainfo_fail_dict = []
+            try:
+                yield
+            finally:
+                self._flush_pending_deletes(force=True)
 
     def save_oof_mediainfo_file(
         self, item_list: List | Tuple, json_data: Dict, key: str
@@ -804,16 +827,10 @@ class MediaInfoDownloader:
         """
         根据列表自动批量下载
         """
-        with self._batch_lock:
+        with self._batch_download_session():
             image_suffix: Set[str] = set(TYPE_TO_SUFFIXES[2])
             subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
             oof_fast_mi_suffix: Set[str] = {".nfo"}
-
-            self.stop_all_flag = False
-            self.mediainfo_count: int = 0
-            self.mediainfo_fail_count: int = 0
-            self.mediainfo_fail_dict: List = []
-            self._pending_delete_scids = []
 
             image_list: List = []
             subtitle_list: List = []
@@ -845,7 +862,6 @@ class MediaInfoDownloader:
             if other_list and not self.stop_all_flag:
                 self.batch_downloader(other_list)
 
-            self._flush_pending_deletes(force=True)
             return (
                 self.mediainfo_count,
                 self.mediainfo_fail_count,
@@ -856,14 +872,9 @@ class MediaInfoDownloader:
         """
         根据列表自动批量分享下载
         """
-        with self._batch_lock:
+        with self._batch_download_session():
             subtitle_suffix: Set[str] = {".srt", ".ass", ".ssa"}
             oof_fast_mi_suffix: Set[str] = {".nfo"}
-
-            self.mediainfo_count: int = 0
-            self.mediainfo_fail_count: int = 0
-            self.mediainfo_fail_dict: List = []
-            self._pending_delete_scids = []
 
             image_list: List = []
             subtitle_list: List = []
@@ -895,7 +906,6 @@ class MediaInfoDownloader:
             if other_list:
                 self.batch_share_downloader(other_list)
 
-            self._flush_pending_deletes(force=True)
             return (
                 self.mediainfo_count,
                 self.mediainfo_fail_count,
