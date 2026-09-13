@@ -9,6 +9,7 @@ import types
 import unittest
 from multiprocessing import Queue
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 class _FakeLogger:
@@ -98,6 +99,25 @@ def _sleeping_worker(params, result_queue):
     time.sleep(2)
 
 
+def _large_error_worker(params, result_queue):
+    result_queue.put({"status": "error", "exception_type": "ValueError",
+                      "exception": "large export failure", "traceback": "x" * 262144})
+
+
+def _success_then_crash_worker(params, result_queue):
+    result_queue.put({"status": "ok"})
+    result_queue.close()
+    result_queue.join_thread()
+    os._exit(7)
+
+
+def _stubborn_worker(params, result_queue):
+    import signal
+
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(10)
+
+
 class ExportDirWatchdogTest(unittest.TestCase):
     def setUp(self):
         self._saved_modules = {}
@@ -185,6 +205,14 @@ class ExportDirWatchdogTest(unittest.TestCase):
         self.assertEqual(self.module.resolve_export_dir_status_timeout(-1), default)
         self.assertEqual(self.module.resolve_export_dir_status_timeout(None), default)
 
+    def test_nonfinite_timeouts_cannot_disable_watchdog(self):
+        for value in (float("inf"), float("nan"), "Infinity", "1e309"):
+            with self.subTest(value=value):
+                self.assertEqual(self.module.resolve_export_dir_status_timeout(value), 900)
+                self.assertEqual(
+                    self.module.build_download_timeout_config({"read": value})["read"], 300,
+                )
+
     def test_lock_acquire_immediately_and_release_logs_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             lock_path = Path(temp_dir) / "export_dir.lock"
@@ -234,6 +262,59 @@ class ExportDirWatchdogTest(unittest.TestCase):
 
         joined = "\n".join(message for _, message in self.fake_logger.records)
         self.assertIn("phase=watchdog_timeout", joined)
+
+    def test_large_error_result_does_not_deadlock_while_joining_worker(self):
+        with self.assertRaisesRegex(RuntimeError, "large export failure"):
+            self.module.run_worker_with_watchdog(
+                params={"watchdog_timeout": 1},
+                context=self._context(),
+                worker_target=_large_error_worker,
+            )
+
+    def test_nonzero_exit_is_not_accepted_as_success(self):
+        with self.assertRaisesRegex(RuntimeError, "exitcode=7"):
+            self.module.run_worker_with_watchdog(
+                params={"watchdog_timeout": 1}, context=self._context(),
+                worker_target=_success_then_crash_worker,
+            )
+
+    @unittest.skipIf(sys.platform.startswith("win"), "需要 POSIX SIGTERM 语义")
+    def test_timeout_kills_stubborn_worker_and_closes_resources(self):
+        process_factory = self.module.Process
+        queue = self.module.Queue(maxsize=1)
+        processes = []
+
+        def make_process(**kwargs):
+            process = process_factory(**kwargs)
+            processes.append(process)
+            return process
+
+        with patch.object(self.module, "Process", side_effect=make_process), patch.object(
+            self.module, "Queue", return_value=queue
+        ), patch.object(self.module, "DEFAULT_EXPORT_DIR_TERMINATE_GRACE_SECONDS", 0.05):
+            with self.assertRaises(TimeoutError):
+                self.module.run_worker_with_watchdog(
+                    params={"watchdog_timeout": 0.2}, context=self._context(),
+                    worker_target=_stubborn_worker,
+                )
+        self.assertTrue(queue._closed)
+        with self.assertRaises(ValueError):
+            _ = processes[0].sentinel
+        self.assertTrue(any("执行 kill" in message for _, message in self.fake_logger.records))
+
+    def test_process_start_failure_closes_queue_and_process(self):
+        process = Mock()
+        process.start.side_effect = OSError("cannot fork")
+        process.is_alive.return_value = False
+        queue = self.module.Queue(maxsize=1)
+        with patch.object(self.module, "Process", return_value=process), patch.object(
+            self.module, "Queue", return_value=queue
+        ), self.assertRaisesRegex(OSError, "cannot fork"):
+            self.module.run_worker_with_watchdog(
+                params={"watchdog_timeout": 1}, context=self._context(),
+            )
+        process.close.assert_called_once()
+        self.assertTrue(queue._closed)
 
     def test_worker_success_writes_export_items_and_cleans_remote_file(self):
         client = _FakeClient()

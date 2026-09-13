@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import codecs
 import json
+import math
 import os
 import platform
 import queue
@@ -156,7 +157,7 @@ def _to_positive_float(value: Any) -> Optional[float]:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if number > 0:
+    if math.isfinite(number) and number > 0:
         return number
     return None
 
@@ -709,40 +710,69 @@ def run_worker_with_watchdog(
     """
     result_queue: Queue = Queue(maxsize=1)
     process = Process(target=worker_target, args=(params, result_queue))
-    process.start()
-    process.join(params["watchdog_timeout"])
-    if process.is_alive():
-        context.log(
-            "watchdog_timeout",
-            "单路径目录树导出超过 watchdog，终止子进程",
-            level="error",
-            pid=process.pid,
-        )
-        process.terminate()
-        process.join(DEFAULT_EXPORT_DIR_TERMINATE_GRACE_SECONDS)
-        if process.is_alive():
-            context.log(
-                "watchdog_timeout",
-                "子进程 terminate 后仍未退出，执行 kill",
-                level="error",
-                pid=process.pid,
-            )
-            process.kill()
-            process.join()
-        raise TimeoutError(
-            f"目录树导出 watchdog 超时: {params['watchdog_timeout']:.0f}s"
-        )
+    started = False
+    try:
+        process.start()
+        started = True
+        deadline = time.monotonic() + params["watchdog_timeout"]
+        result = None
+        while process.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                context.log(
+                    "watchdog_timeout",
+                    "单路径目录树导出超过 watchdog，终止子进程",
+                    level="error",
+                    pid=process.pid,
+                )
+                raise TimeoutError(
+                    f"目录树导出 watchdog 超时: {params['watchdog_timeout']:.0f}s"
+                )
+            if result is None:
+                try:
+                    # 子进程退出前会等队列刷新；先 join 会把大错误结果堵在管道里
+                    result = result_queue.get(timeout=min(0.2, remaining))
+                except queue.Empty:
+                    pass
+            else:
+                process.join(timeout=min(0.2, remaining))
 
-    result = _queue_get_result(result_queue)
-    if result is None:
-        raise RuntimeError(
-            f"目录树导出子进程无结果退出，exitcode={process.exitcode}"
-        )
-    if result.get("status") != "ok":
-        raise RuntimeError(
-            f"目录树导出失败: {result.get('exception_type')}: {result.get('exception')}"
-        )
-    return result
+        process.join()
+        if process.exitcode != 0:
+            raise RuntimeError(f"目录树导出子进程异常退出，exitcode={process.exitcode}")
+        if result is None:
+            result = _queue_get_result(result_queue)
+        if result is None:
+            raise RuntimeError(
+                f"目录树导出子进程无结果退出，exitcode={process.exitcode}"
+            )
+        if result.get("status") != "ok":
+            raise RuntimeError(
+                f"目录树导出失败: {result.get('exception_type')}: {result.get('exception')}"
+            )
+        return result
+    finally:
+        if started and process.is_alive():
+            process.terminate()
+            process.join(DEFAULT_EXPORT_DIR_TERMINATE_GRACE_SECONDS)
+            if process.is_alive():
+                context.log(
+                    "watchdog_timeout",
+                    "子进程 terminate 后仍未退出，执行 kill",
+                    level="error",
+                    pid=process.pid,
+                )
+                process.kill()
+                process.join(DEFAULT_EXPORT_DIR_TERMINATE_GRACE_SECONDS)
+                if process.is_alive():
+                    context.log(
+                        "worker_stop_failed", "子进程 kill 后仍未退出",
+                        level="error", pid=process.pid,
+                    )
+        if not process.is_alive():
+            process.close()
+        result_queue.close()
+        result_queue.join_thread()
 
 
 def build_export_dir_watchdog_params(
