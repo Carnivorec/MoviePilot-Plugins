@@ -477,17 +477,20 @@ class ServiceHelper:
             mediainfodownloader=self.mediainfodownloader,
         )
         strm_helper.strm_exec_history_kind = "full"
-        strm_helper.generate_strm_files(
-            full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
-        )
-        (
-            strm_count,
-            mediainfo_count,
-            strm_fail_count,
-            mediainfo_fail_count,
-            remove_unless_strm_count,
-            strm_cleanup_deferred_count,
-        ) = strm_helper.get_generate_total()
+        try:
+            strm_helper.generate_strm_files(
+                full_sync_strm_paths=configer.get_config("full_sync_strm_paths"),
+            )
+        finally:
+            (
+                strm_count,
+                mediainfo_count,
+                strm_fail_count,
+                mediainfo_fail_count,
+                remove_unless_strm_count,
+                strm_cleanup_deferred_count,
+            ) = strm_helper.get_generate_total()
+        sync_error = strm_helper.get_sync_error()
         if configer.get_config("notify"):
             text = f"""
 📄 生成STRM文件 {strm_count} 个
@@ -499,11 +502,16 @@ class ServiceHelper:
                 text += f"🗑️ 清理无效STRM文件 {remove_unless_strm_count} 个"
             if strm_cleanup_deferred_count != 0:
                 text += f"\n⏳ 待二次确认清理无效 STRM {strm_cleanup_deferred_count} 个"
+            if sync_error:
+                text += f"\n⚠️ {sync_error}"
             post_message(
                 mtype=NotificationType.Plugin,
-                title=i18n.translate("full_sync_done_title"),
+                title="⚠️【115网盘】全量同步未全部完成"
+                if sync_error else i18n.translate("full_sync_done_title"),
                 text=text,
             )
+        if sync_error:
+            raise RuntimeError(sync_error)
 
     def start_full_sync(self):
         """

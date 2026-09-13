@@ -3,6 +3,7 @@ __all__ = ["FullSyncStrmHelper", "strm_cleanup_interaction"]
 
 from collections import namedtuple
 from concurrent.futures import as_completed, ThreadPoolExecutor
+from contextlib import contextmanager
 from itertools import batched
 from pathlib import Path
 from os import makedirs
@@ -10,7 +11,8 @@ from queue import Empty, Queue
 from secrets import token_hex
 from threading import Thread
 from time import perf_counter, sleep
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
+from uuid import uuid4
 
 from orjson import dumps
 from p115client import P115Client
@@ -93,6 +95,9 @@ class FullSyncStrmHelper:
         self.strm_exec_history_extra: Optional[Dict[str, Any]] = None
         self.strm_fail_dict: Dict[str, str] = {}
         self.mediainfo_fail_dict: List = []
+        self._run_error: Optional[str] = None
+        self._local_scan_error: Optional[Exception] = None
+        self._local_scan_threads: List[Thread] = []
         self.pan_transfer_enabled = configer.pan_transfer_enabled
         self.pan_transfer_paths = configer.pan_transfer_paths
         self.overwrite_mode = configer.full_sync_overwrite_mode
@@ -123,8 +128,9 @@ class FullSyncStrmHelper:
         self.write_queue = Queue(maxsize=4096)
         self.result_queue = Queue()
 
-        self.local_tree_path = configer.PLUGIN_TEMP_PATH / "local_tree.txt"
-        self.pan_tree_path = configer.PLUGIN_TEMP_PATH / "pan_tree.txt"
+        tree_id = uuid4().hex
+        self.local_tree_path = configer.PLUGIN_TEMP_PATH / f"full_local_tree_{tree_id}.txt"
+        self.pan_tree_path = configer.PLUGIN_TEMP_PATH / f"full_pan_tree_{tree_id}.txt"
         self.local_tree = DirectoryTree(self.local_tree_path)
         self.pan_tree = DirectoryTree(self.pan_tree_path)
 
@@ -260,6 +266,7 @@ class FullSyncStrmHelper:
         :return Thread: 扫描进程
         """
         self._clean_tree()
+        self._local_scan_error = None
 
         def background_task(_target_dir):
             """
@@ -274,6 +281,7 @@ class FullSyncStrmHelper:
                 )
                 logger.info(f"【全量STRM生成】扫描本地媒体库文件完成: {_target_dir}")
             except Exception as e:
+                self._local_scan_error = e
                 logger.error(
                     f"【全量STRM生成】扫描本地媒体库文件 {_target_dir} 错误: {e}"
                 )
@@ -283,6 +291,7 @@ class FullSyncStrmHelper:
             args=(target_dir,),
         )
         local_tree_task_thread.start()
+        self._local_scan_threads.append(local_tree_task_thread)
 
         return local_tree_task_thread
 
@@ -779,29 +788,17 @@ class FullSyncStrmHelper:
             f"【全量STRM生成】全量更新数据库完成，时间 {self.elapsed_time:.6f} 秒，数据库写入量 {self.total_db_write_count} 条"
         )
 
-    def generate_strm_files(self, full_sync_strm_paths):
-        """
-        生成 STRM 文件
-
-        :param full_sync_strm_paths (str): 全量同步路径配置字符串
-        """
-        rust = configer.full_sync_process_rust
-        media_paths = full_sync_strm_paths.split("\n")
-
-        num_io_workers = 8
+    @contextmanager
+    def _io_writer_session(self) -> Generator:
+        """管理 IO 与统计线程，扫描提前结束时也排空队列并回收线程"""
         io_threads = []
-        for _ in range(num_io_workers):
-            thread = Thread(target=self.__io_writer_worker)
-            thread.daemon = True
-            thread.start()
-            io_threads.append(thread)
+        collector_thread = None
+        collector_started = False
+        self._local_scan_threads = []
 
         def result_collector():
-            """
-            从结果队列收集 IO 写入线程的处理结果并统计
-            """
             finished_workers = 0
-            while finished_workers < num_io_workers:
+            while finished_workers < len(io_threads):
                 try:
                     result = self.result_queue.get()
                     if result is None:
@@ -815,361 +812,429 @@ class FullSyncStrmHelper:
                 finally:
                     self.result_queue.task_done()
 
-        collector_thread = Thread(target=result_collector)
-        collector_thread.daemon = True
-        collector_thread.start()
+        try:
+            for _ in range(8):
+                thread = Thread(target=self.__io_writer_worker, daemon=True)
+                thread.start()
+                io_threads.append(thread)
+            collector_thread = Thread(target=result_collector, daemon=True)
+            collector_thread.start()
+            collector_started = True
+            yield
+        finally:
+            for scanner in self._local_scan_threads:
+                scanner.join()
+            self.write_queue.join()
+            for _ in io_threads:
+                self.write_queue.put(None)
+            for thread in io_threads:
+                thread.join()
+            if collector_started:
+                self.result_queue.join()
+                collector_thread.join()
+            else:
+                while True:
+                    try:
+                        self.result_queue.get_nowait()
+                        self.result_queue.task_done()
+                    except Empty:
+                        break
 
-        with ThreadPoolExecutor(
-            max_workers=int(configer.full_sync_process_num)
-        ) as executor:
-            for path in media_paths:
-                if not path:
-                    continue
-                parts = path.split("#", 2)
-                if len(parts) >= 3 and str(parts[2]).strip() == "0":
-                    continue
-                path_base64 = CBase64.encode(str(path).encode("utf-8"))
-                pan_media_dir = parts[1]
-                target_dir = parts[0]
+    def generate_strm_files(self, full_sync_strm_paths):
+        """
+        执行全量同步并如实记录提前终止和文件失败
 
-                if self.remove_unless_strm:
-                    local_tree_task_thread = self.__remove_unless_strm_local(target_dir)
+        :param full_sync_strm_paths (str): 全量同步路径配置
 
-                if rust:
-                    config_for_rust = {
-                        "pan_transfer_enabled": self.pan_transfer_enabled,
-                        "pan_transfer_paths": self.pan_transfer_paths.split("\n")
-                        if self.pan_transfer_paths
-                        else [],
-                        "auto_download_mediainfo": self.auto_download_mediainfo,
-                        "rmt_mediaext_set": list(self.rmt_mediaext_set),
-                        "download_mediaext_set": list(self.download_mediaext_set),
-                        "strm_generate_blacklist": configer.strm_generate_blacklist
-                        or [],
-                        "mediainfo_download_whitelist": configer.mediainfo_download_whitelist
-                        or [],
-                        "mediainfo_download_blacklist": configer.mediainfo_download_blacklist
-                        or [],
-                        "full_sync_min_file_size": configer.full_sync_min_file_size
-                        or 0,
-                        "pan_media_dir": pan_media_dir,
-                    }
-                    config_json = dumps(config_for_rust).decode("utf-8")
+        :return bool: 本轮全部成功返回 True
+        """
+        started = perf_counter()
+        completed = False
+        self._run_error = None
+        try:
+            completed = self._generate_strm_files(full_sync_strm_paths)
+            if not completed and not self._run_error:
+                self._run_error = "全量同步提前终止，详细原因见日志"
+            return bool(completed and not self.get_sync_error())
+        except Exception as exc:
+            self._run_error = str(exc)
+            raise
+        finally:
+            self.elapsed_time = perf_counter() - started
+            if self.get_sync_error():
+                self.get_generate_total()
+
+    def get_sync_error(self) -> Optional[str]:
+        """返回全量同步的最终失败摘要，全部成功时返回 None"""
+        errors = [self._run_error] if self._run_error else []
+        if self.strm_fail_count:
+            errors.append(f"STRM 生成失败 {self.strm_fail_count} 个")
+        if self.mediainfo_fail_count:
+            errors.append(f"媒体文件下载失败 {self.mediainfo_fail_count} 个")
+        return "；".join(errors) or None
+
+    def _generate_strm_files(self, full_sync_strm_paths):
+        """
+        生成 STRM 文件
+
+        :param full_sync_strm_paths (str): 全量同步路径配置字符串
+        """
+        rust = configer.full_sync_process_rust
+        media_paths = full_sync_strm_paths.split("\n")
+
+        with self._io_writer_session():
+            with ThreadPoolExecutor(
+                max_workers=int(configer.full_sync_process_num)
+            ) as executor:
+                for path in media_paths:
+                    if not path:
+                        continue
+                    parts = path.split("#", 2)
+                    if len(parts) >= 3 and str(parts[2]).strip() == "0":
+                        continue
+                    path_base64 = CBase64.encode(str(path).encode("utf-8"))
+                    pan_media_dir = parts[1]
+                    target_dir = parts[0]
+
+                    if self.remove_unless_strm:
+                        local_tree_task_thread = self.__remove_unless_strm_local(target_dir)
+
+                    if rust:
+                        config_for_rust = {
+                            "pan_transfer_enabled": self.pan_transfer_enabled,
+                            "pan_transfer_paths": self.pan_transfer_paths.split("\n")
+                            if self.pan_transfer_paths
+                            else [],
+                            "auto_download_mediainfo": self.auto_download_mediainfo,
+                            "rmt_mediaext_set": list(self.rmt_mediaext_set),
+                            "download_mediaext_set": list(self.download_mediaext_set),
+                            "strm_generate_blacklist": configer.strm_generate_blacklist
+                            or [],
+                            "mediainfo_download_whitelist": configer.mediainfo_download_whitelist
+                            or [],
+                            "mediainfo_download_blacklist": configer.mediainfo_download_blacklist
+                            or [],
+                            "full_sync_min_file_size": configer.full_sync_min_file_size
+                            or 0,
+                            "pan_media_dir": pan_media_dir,
+                        }
+                        config_json = dumps(config_for_rust).decode("utf-8")
+
+                        try:
+                            processor = Processor(config_json)
+                        except Exception as e:
+                            self._run_error = f"初始化 Rust 核心失败: {e}"
+                            logger.error(f"【全量STRM生成】初始化 Rust 核心失败: {e}")
+                            return False
+
+                        logger.info(
+                            f"【全量STRM生成】Full Sync STRM Rust Core Version：v{rust_core_version}"
+                        )
 
                     try:
-                        processor = Processor(config_json)
+                        parent_id = get_pid_by_path(
+                            self.client, pan_media_dir, True, False, False
+                        )
+                        logger.info(
+                            f"【全量STRM生成】网盘媒体目录 ID 获取成功: {pan_media_dir} {parent_id}"
+                        )
                     except Exception as e:
-                        logger.error(f"【全量STRM生成】初始化 Rust 核心失败: {e}")
+                        sentry_manager.sentry_hub.capture_exception(e)
+                        self._run_error = f"网盘目录 ID 获取失败: {pan_media_dir}: {e}"
+                        logger.error(
+                            f"【全量STRM生成】网盘媒体目录 ID 获取失败: {pan_media_dir} {e}"
+                        )
                         return False
 
-                    logger.info(
-                        f"【全量STRM生成】Full Sync STRM Rust Core Version：v{rust_core_version}"
-                    )
-
-                try:
-                    parent_id = get_pid_by_path(
-                        self.client, pan_media_dir, True, False, False
-                    )
-                    logger.info(
-                        f"【全量STRM生成】网盘媒体目录 ID 获取成功: {pan_media_dir} {parent_id}"
-                    )
-                except Exception as e:
-                    sentry_manager.sentry_hub.capture_exception(e)
-                    logger.error(
-                        f"【全量STRM生成】网盘媒体目录 ID 获取失败: {pan_media_dir} {e}"
-                    )
-                    return False
-
-                try:
-                    if (
-                        configer.get_config("full_sync_iter_function")
-                        == "iter_files_with_path_skim"
-                    ):
-                        iter_func = iter_files_with_path_skim
-                        iter_kwargs = {
-                            "cid": parent_id,
-                            "with_ancestors": True,
-                            **configer.get_ios_ua_app(),
-                        }
-                    else:
-                        iter_func = iter_files_with_path
-                        iter_kwargs = {
-                            "cid": parent_id,
-                            "with_ancestors": True,
-                            "cooldown": 1.5,
-                            "use_media_api": False,
-                            **configer.get_ios_ua_app(),
-                        }
-                    logger.debug(
-                        f"【全量STRM生成】迭代函数 {iter_func}; 参数 {iter_kwargs}"
-                    )
-                    start_time = perf_counter()
-                    seen_folder_ids: Set[str] = set()
-                    seen_file_ids: Set[str] = set()
-                    for batch in batched(
-                        iter_func(self.client, **iter_kwargs),
-                        int(configer.get_config("full_sync_batch_num")),
-                    ):
-                        path_list: List = []
-
-                        db_task_future = executor.submit(
-                            self.__process_db_item,
-                            batch,
-                            seen_folder_ids,
-                            seen_file_ids,
+                    try:
+                        if (
+                            configer.get_config("full_sync_iter_function")
+                            == "iter_files_with_path_skim"
+                        ):
+                            iter_func = iter_files_with_path_skim
+                            iter_kwargs = {
+                                "cid": parent_id,
+                                "with_ancestors": True,
+                                **configer.get_ios_ua_app(),
+                            }
+                        else:
+                            iter_func = iter_files_with_path
+                            iter_kwargs = {
+                                "cid": parent_id,
+                                "with_ancestors": True,
+                                "cooldown": 1.5,
+                                "use_media_api": False,
+                                **configer.get_ios_ua_app(),
+                            }
+                        logger.debug(
+                            f"【全量STRM生成】迭代函数 {iter_func}; 参数 {iter_kwargs}"
                         )
+                        start_time = perf_counter()
+                        seen_folder_ids: Set[str] = set()
+                        seen_file_ids: Set[str] = set()
+                        for batch in batched(
+                            iter_func(self.client, **iter_kwargs),
+                            int(configer.get_config("full_sync_batch_num")),
+                        ):
+                            path_list: List = []
 
-                        if rust:
-                            input_batch = [
-                                {
-                                    "name": item.get("name"),
-                                    "path": item.get("path"),
-                                    "is_dir": item.get("is_dir"),
-                                    "size": item.get("size"),
-                                    "pickcode": item.get(
-                                        "pickcode", item.get("pick_code")
-                                    ),
-                                    "sha1": item.get("sha1"),
-                                }
-                                for item in batch
-                                if item.get("name") and item.get("path")
-                            ]
+                            db_task_future = executor.submit(
+                                self.__process_db_item,
+                                batch,
+                                seen_folder_ids,
+                                seen_file_ids,
+                            )
 
-                            self.total_count += len(input_batch)
-
-                            batch_json = dumps(input_batch).decode("utf-8")
-                            results: PackedResult = processor.process_batch(batch_json)
-
-                            for fail_info in results.fail_results:
-                                self.strm_fail_count += 1
-                                self.strm_fail_dict[fail_info.path_in_pan] = (
-                                    fail_info.reason
-                                )
-
-                            for download_info in results.download_results:
-                                local_path = target_dir / PathUtils.sanitize_path_parts(
-                                    Path(download_info.path_in_pan).relative_to(
-                                        pan_media_dir
-                                    )
-                                )
-                                if (
-                                    local_path.exists()
-                                    and self.overwrite_mode == "never"
-                                ):
-                                    self.__base_logger(
-                                        "warn",
-                                        f"【全量STRM生成】媒体文件 {local_path} 已存在，覆盖模式为 'never'，跳过下载。",
-                                    )
-                                    continue
-                                self.download_mediainfo_list.append(
+                            if rust:
+                                input_batch = [
                                     {
-                                        "type": "local",
-                                        "pickcode": download_info.pickcode,
-                                        "path": local_path,
-                                        "sha1": download_info.sha1,
+                                        "name": item.get("name"),
+                                        "path": item.get("path"),
+                                        "is_dir": item.get("is_dir"),
+                                        "size": item.get("size"),
+                                        "pickcode": item.get(
+                                            "pickcode", item.get("pick_code")
+                                        ),
+                                        "sha1": item.get("sha1"),
                                     }
-                                )
+                                    for item in batch
+                                    if item.get("name") and item.get("path")
+                                ]
 
-                            for strm_info in results.strm_results:
-                                local_path = target_dir / PathUtils.sanitize_path_parts(
-                                    Path(strm_info.path_in_pan).relative_to(
-                                        pan_media_dir
+                                self.total_count += len(input_batch)
+
+                                batch_json = dumps(input_batch).decode("utf-8")
+                                results: PackedResult = processor.process_batch(batch_json)
+
+                                for fail_info in results.fail_results:
+                                    self.strm_fail_count += 1
+                                    self.strm_fail_dict[fail_info.path_in_pan] = (
+                                        fail_info.reason
                                     )
-                                )
-                                new_file_path = local_path.with_name(
-                                    StrmGenerater.get_strm_filename(local_path)
-                                )
-                                if self.remove_unless_strm:
-                                    path_list.append(str(new_file_path))
-                                if new_file_path.exists():
-                                    if self.overwrite_mode == "never":
+
+                                for download_info in results.download_results:
+                                    local_path = target_dir / PathUtils.sanitize_path_parts(
+                                        Path(download_info.path_in_pan).relative_to(
+                                            pan_media_dir
+                                        )
+                                    )
+                                    if (
+                                        local_path.exists()
+                                        and self.overwrite_mode == "never"
+                                    ):
                                         self.__base_logger(
                                             "warn",
-                                            f"【全量STRM生成】STRM 文件 {new_file_path} 已存在，覆盖模式为 'never'，跳过生成。",
+                                            f"【全量STRM生成】媒体文件 {local_path} 已存在，覆盖模式为 'never'，跳过下载。",
                                         )
                                         continue
-                                    self.__base_logger(
-                                        "warn",
-                                        f"【全量STRM生成】{new_file_path} 已存在，将进行覆盖。",
+                                    self.download_mediainfo_list.append(
+                                        {
+                                            "type": "local",
+                                            "pickcode": download_info.pickcode,
+                                            "path": local_path,
+                                            "sha1": download_info.sha1,
+                                        }
                                     )
-                                strm_url = self.strmurlgetter.get_strm_url(
-                                    strm_info.pickcode,
-                                    strm_info.original_file_name,
-                                    strm_info.path_in_pan,
-                                )
-                                self.write_queue.put(
-                                    (
-                                        new_file_path,
-                                        strm_url,
+
+                                for strm_info in results.strm_results:
+                                    local_path = target_dir / PathUtils.sanitize_path_parts(
+                                        Path(strm_info.path_in_pan).relative_to(
+                                            pan_media_dir
+                                        )
+                                    )
+                                    new_file_path = local_path.with_name(
+                                        StrmGenerater.get_strm_filename(local_path)
+                                    )
+                                    if self.remove_unless_strm:
+                                        path_list.append(str(new_file_path))
+                                    if new_file_path.exists():
+                                        if self.overwrite_mode == "never":
+                                            self.__base_logger(
+                                                "warn",
+                                                f"【全量STRM生成】STRM 文件 {new_file_path} 已存在，覆盖模式为 'never'，跳过生成。",
+                                            )
+                                            continue
+                                        self.__base_logger(
+                                            "warn",
+                                            f"【全量STRM生成】{new_file_path} 已存在，将进行覆盖。",
+                                        )
+                                    strm_url = self.strmurlgetter.get_strm_url(
+                                        strm_info.pickcode,
                                         strm_info.original_file_name,
+                                        strm_info.path_in_pan,
                                     )
-                                )
-
-                            if configer.full_sync_strm_log:
-                                for skip_info in results.skip_results:
-                                    if not skip_info.reason:
-                                        continue
-                                    self.__base_logger(
-                                        "warn", "【全量STRM生成】" + skip_info.reason
-                                    )
-                        else:
-                            target_dir_path = Path(target_dir)
-
-                            future_to_item = {
-                                executor.submit(
-                                    self.__process_single_item,
-                                    item,
-                                    target_dir_path,
-                                    pan_media_dir,
-                                ): item
-                                for item in batch
-                            }
-
-                            self.total_count += len(future_to_item)
-
-                            for future in as_completed(future_to_item):
-                                item = future_to_item[future]
-                                try:
-                                    result = future.result()
-                                    if not result:
-                                        continue
-
-                                    if result.status == "fail":
-                                        self.strm_fail_count += 1
-                                        self.strm_fail_dict[result.path] = (
-                                            result.message
+                                    self.write_queue.put(
+                                        (
+                                            new_file_path,
+                                            strm_url,
+                                            strm_info.original_file_name,
                                         )
-                                    elif result.status == "download":
-                                        self.download_mediainfo_list.append(result.data)
-
-                                    if result.path_entry:
-                                        path_list.append(result.path_entry)
-
-                                except Exception as e:
-                                    sentry_manager.sentry_hub.capture_exception(e)
-                                    logger.error(
-                                        f"【全量STRM生成】并发处理出错: {item} - {str(e)}"
                                     )
 
-                        try:
-                            seen_folder_ids, seen_file_ids = db_task_future.result()
-                        except Exception as e:
-                            sentry_manager.sentry_hub.capture_exception(e)
-                            logger.error(
-                                f"【全量STRM生成】数据库处理并发处理出错: {str(e)}"
-                            )
+                                if configer.full_sync_strm_log:
+                                    for skip_info in results.skip_results:
+                                        if not skip_info.reason:
+                                            continue
+                                        self.__base_logger(
+                                            "warn", "【全量STRM生成】" + skip_info.reason
+                                        )
+                            else:
+                                target_dir_path = Path(target_dir)
 
-                        if self.remove_unless_strm:
-                            self.pan_tree.generate_tree_from_list(
-                                path_list, append=True
-                            )
+                                future_to_item = {
+                                    executor.submit(
+                                        self.__process_single_item,
+                                        item,
+                                        target_dir_path,
+                                        pan_media_dir,
+                                    ): item
+                                    for item in batch
+                                }
 
-                    end_time = perf_counter()
-                    self.elapsed_time += end_time - start_time
-                    self.total_db_write_count += len(seen_file_ids) + len(
-                        seen_folder_ids
-                    )
+                                self.total_count += len(future_to_item)
 
-                    self.write_queue.join()
-                    self.result_queue.join()
-                except Exception as e:
-                    sentry_manager.sentry_hub.capture_exception(e)
-                    logger.error(
-                        f"【全量STRM生成】全量生成 STRM 文件失败: {pan_media_dir} {e}",
-                        exc_info=True,
-                    )
-                    return False
+                                for future in as_completed(future_to_item):
+                                    item = future_to_item[future]
+                                    try:
+                                        result = future.result()
+                                        if not result:
+                                            continue
 
-                if self.remove_unless_strm:
-                    while local_tree_task_thread.is_alive():  # noqa
-                        logger.info("【全量STRM生成】扫描本地媒体库运行中...")
-                        sleep(10)
-                    if (
-                        not self.strm_fail_dict
-                        and (
-                            settings.CACHE_BACKEND_TYPE == "redis"
-                            or self.local_tree_path.exists()
-                        )
-                        and self.local_tree.count() != 0
-                    ):
-                        try:
-                            counts = self.__get_remove_unless_strm(path_base64).get(
-                                "counts", []
-                            )
-                            local_tree_count = self.local_tree.count()
-                            remove_count = self.local_tree.compare_entry_counts(
-                                self.pan_tree
-                            )
-                            rp = (remove_count / local_tree_count) * 100
-                            if rp > configer.full_sync_remove_unless_max_threshold:
-                                # 在阈值范围外，进行数据稳定性测试
-                                logger.warn(
-                                    f"【全量STRM生成】本次将删除文件个数为 {remove_count}，"
-                                    f"超过安全阈值 {configer.full_sync_remove_unless_max_threshold}% "
-                                    f"不进行删除操作"
+                                        if result.status == "fail":
+                                            self.strm_fail_count += 1
+                                            self.strm_fail_dict[result.path] = (
+                                                result.message
+                                            )
+                                        elif result.status == "download":
+                                            self.download_mediainfo_list.append(result.data)
+
+                                        if result.path_entry:
+                                            path_list.append(result.path_entry)
+
+                                    except Exception as e:
+                                        self.strm_fail_count += 1
+                                        failed_path = str(item.get("path", item.get("name", "unknown")))
+                                        self.strm_fail_dict[failed_path] = str(e)
+                                        sentry_manager.sentry_hub.capture_exception(e)
+                                        logger.error(
+                                            f"【全量STRM生成】并发处理出错: {item} - {str(e)}"
+                                        )
+
+                            try:
+                                seen_folder_ids, seen_file_ids = db_task_future.result()
+                            except Exception as e:
+                                self._run_error = f"数据库处理失败: {e}"
+                                sentry_manager.sentry_hub.capture_exception(e)
+                                logger.error(
+                                    f"【全量STRM生成】数据库处理并发处理出错: {str(e)}"
                                 )
 
-                                counts.append(remove_count)
-                                if len(counts) < 3:
-                                    logger.info(
-                                        f"【全量STRM生成】删除数据稳定性检查，已收集 {len(counts)}/3 个数据点 {counts}"
-                                    )
-                                    self.__save_remove_unless_strm(
-                                        path_base64, {"counts": counts}
-                                    )
-                                    continue
+                            if self.remove_unless_strm:
+                                self.pan_tree.generate_tree_from_list(
+                                    path_list, append=True
+                                )
 
-                                if MathUtils.is_stable_cv(
-                                    counts,
-                                    configer.full_sync_remove_unless_stable_threshold
-                                    / 100,
-                                ):
-                                    logger.info(
-                                        f"【全量STRM生成】删除数据稳定性检查通过: {counts}"
-                                    )
-                                    self.__save_remove_unless_strm(
-                                        path_base64, {"counts": []}
-                                    )
-                                else:
-                                    logger.warn(
-                                        f"【全量STRM生成】删除数据稳定性检查失败，重置计数器: {counts}"
-                                    )
-                                    self.__save_remove_unless_strm(
-                                        path_base64, {"counts": [remove_count]}
-                                    )
-                                    continue
-                            else:
-                                # 在阈值内，且存在计数，则清空
-                                if len(counts) > 0:
-                                    self.__save_remove_unless_strm(
-                                        path_base64, {"counts": []}
-                                    )
-
-                            for remove_path in self.local_tree.compare_trees(
-                                self.pan_tree
-                            ):
-                                if self.cleanup_confirm_mode == "none":
-                                    self.__apply_remove_unless_strm_path(remove_path)
-                                else:
-                                    self.__defer_remove_unless_strm_path(remove_path)
-                        except Exception as e:
-                            sentry_manager.sentry_hub.capture_exception(e)
-                            logger.error(f"【全量STRM生成】清理无效 STRM 文件失败: {e}")
-                    else:
-                        logger.warn(
-                            "【全量STRM生成】存在生成失败的 STRM 文件或扫描本地文件出错，跳过清理无效 STRM 文件"
+                        end_time = perf_counter()
+                        self.elapsed_time += end_time - start_time
+                        self.total_db_write_count += len(seen_file_ids) + len(
+                            seen_folder_ids
                         )
 
-        self._flush_deferred_strm_cleanup_batch()
+                        self.write_queue.join()
+                        self.result_queue.join()
+                    except Exception as e:
+                        self._run_error = f"目录扫描失败: {pan_media_dir}: {e}"
+                        sentry_manager.sentry_hub.capture_exception(e)
+                        logger.error(
+                            f"【全量STRM生成】全量生成 STRM 文件失败: {pan_media_dir} {e}",
+                            exc_info=True,
+                        )
+                        return False
 
-        logger.info("【全量STRM生成】所有文件处理任务已提交，等待文件写入完成...")
-        self.write_queue.join()
-        for _ in range(num_io_workers):
-            self.write_queue.put(None)
-        for thread in io_threads:
-            thread.join()
-        self.result_queue.join()
-        collector_thread.join()
+                    if self.remove_unless_strm:
+                        local_tree_task_thread.join()
+                        if self._local_scan_error is not None:
+                            self._run_error = f"本地目录扫描失败: {self._local_scan_error}"
+                        if (
+                            not self.strm_fail_dict
+                            and not self._run_error
+                            and self._local_scan_error is None
+                            and (
+                                settings.CACHE_BACKEND_TYPE == "redis"
+                                or self.local_tree_path.exists()
+                            )
+                            and self.local_tree.count() != 0
+                        ):
+                            try:
+                                counts = self.__get_remove_unless_strm(path_base64).get(
+                                    "counts", []
+                                )
+                                local_tree_count = self.local_tree.count()
+                                remove_count = self.local_tree.compare_entry_counts(
+                                    self.pan_tree
+                                )
+                                rp = (remove_count / local_tree_count) * 100
+                                if rp > configer.full_sync_remove_unless_max_threshold:
+                                    # 在阈值范围外，进行数据稳定性测试
+                                    logger.warn(
+                                        f"【全量STRM生成】本次将删除文件个数为 {remove_count}，"
+                                        f"超过安全阈值 {configer.full_sync_remove_unless_max_threshold}% "
+                                        f"不进行删除操作"
+                                    )
+
+                                    counts.append(remove_count)
+                                    if len(counts) < 3:
+                                        logger.info(
+                                            f"【全量STRM生成】删除数据稳定性检查，已收集 {len(counts)}/3 个数据点 {counts}"
+                                        )
+                                        self.__save_remove_unless_strm(
+                                            path_base64, {"counts": counts}
+                                        )
+                                        continue
+
+                                    if MathUtils.is_stable_cv(
+                                        counts,
+                                        configer.full_sync_remove_unless_stable_threshold
+                                        / 100,
+                                    ):
+                                        logger.info(
+                                            f"【全量STRM生成】删除数据稳定性检查通过: {counts}"
+                                        )
+                                        self.__save_remove_unless_strm(
+                                            path_base64, {"counts": []}
+                                        )
+                                    else:
+                                        logger.warn(
+                                            f"【全量STRM生成】删除数据稳定性检查失败，重置计数器: {counts}"
+                                        )
+                                        self.__save_remove_unless_strm(
+                                            path_base64, {"counts": [remove_count]}
+                                        )
+                                        continue
+                                else:
+                                    # 在阈值内，且存在计数，则清空
+                                    if len(counts) > 0:
+                                        self.__save_remove_unless_strm(
+                                            path_base64, {"counts": []}
+                                        )
+
+                                for remove_path in self.local_tree.compare_trees(
+                                    self.pan_tree
+                                ):
+                                    if self.cleanup_confirm_mode == "none":
+                                        self.__apply_remove_unless_strm_path(remove_path)
+                                    else:
+                                        self.__defer_remove_unless_strm_path(remove_path)
+                            except Exception as e:
+                                self._run_error = f"清理失效 STRM 失败: {e}"
+                                sentry_manager.sentry_hub.capture_exception(e)
+                                logger.error(f"【全量STRM生成】清理无效 STRM 文件失败: {e}")
+                        else:
+                            logger.warn(
+                                "【全量STRM生成】存在生成失败的 STRM 文件或扫描本地文件出错，跳过清理无效 STRM 文件"
+                            )
+
+            self._flush_deferred_strm_cleanup_batch()
 
         self.mediainfo_count, self.mediainfo_fail_count, self.mediainfo_fail_dict = (
             self.mediainfodownloader.batch_auto_downloader(
@@ -1201,9 +1266,12 @@ class FullSyncStrmHelper:
         if self.mediainfo_fail_dict:
             for path in self.mediainfo_fail_dict:
                 logger.warn(f"【全量STRM生成】{path} 下载错误")
-        logger.info(
-            f"【全量STRM生成】全量生成 STRM 文件完成，总共生成 {self.strm_count} 个 STRM 文件，下载 {self.mediainfo_count} 个媒体数据文件"
-        )
+        if sync_error := self.get_sync_error():
+            logger.error(f"【全量STRM生成】全量同步未全部完成: {sync_error}")
+        else:
+            logger.info(
+                f"【全量STRM生成】全量生成 STRM 文件完成，总共生成 {self.strm_count} 个 STRM 文件，下载 {self.mediainfo_count} 个媒体数据文件"
+            )
         if self.strm_fail_count != 0 or self.mediainfo_fail_count != 0:
             logger.warn(
                 f"【全量STRM生成】{self.strm_fail_count} 个 STRM 文件生成失败，{self.mediainfo_fail_count} 个媒体数据文件下载失败"
@@ -1231,9 +1299,11 @@ class FullSyncStrmHelper:
         )
         kind = self.strm_exec_history_kind
         if kind:
+            sync_error = self.get_sync_error()
             StrmExecHistoryManager.append_run(
                 kind=kind,
-                success=True,
+                success=sync_error is None,
+                error=sync_error,
                 stats={
                     "strm_count": self.strm_count,
                     "mediainfo_count": self.mediainfo_count,
