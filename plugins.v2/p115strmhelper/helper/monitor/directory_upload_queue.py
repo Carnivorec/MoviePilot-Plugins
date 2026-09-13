@@ -110,9 +110,10 @@ class DirectoryUploadQueue:
                 self._worker_thread = None
                 self._stopping = False
                 return
-            self._stopping = True
+            if not self._stopping:
+                self._stopping = True
+                q.put(self._SENTINEL)
         try:
-            q.put(self._SENTINEL)
             th.join(timeout=30)
             if th.is_alive():
                 logger.warning("【目录上传】worker 未在 30 秒内退出")
@@ -123,9 +124,7 @@ class DirectoryUploadQueue:
             )
         finally:
             with self._lock:
-                if self._worker_thread is th and self._queue is q:
-                    if th.is_alive():
-                        return
+                if self._worker_thread is th and self._queue is q and not th.is_alive():
                     self._worker_thread = None
                     self._queue = None
                     self._stopping = False
