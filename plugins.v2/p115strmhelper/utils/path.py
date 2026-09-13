@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from shutil import rmtree
 from typing import List, Optional, Tuple
 
+from app.core.config import settings
 from app.log import logger
 from app.utils.system import SystemUtils
 
@@ -260,21 +261,29 @@ class PathRemoveUtils:
     @staticmethod
     def clean_related_files(file_path: Path, func_type: str = None):
         """
-        根据一个文件的路径，清理同一文件夹下文件名包含此文件名的其他文件
+        清理同一目录内以完整主文件名为前缀的关联媒体信息文件
 
-        对于 .strm 后缀文件进行保护，不做删除操作
+        前缀后必须为空或关联文件分隔符，保护相近名称文件、STRM 和真实媒体文件
 
         :param file_path (Path): 基准文件路径
         :param func_type (str): 日志输出函数名称
         """
         directory = file_path.parent
         file_stem = file_path.stem
+        protected_suffixes = {".strm"} | {
+            f".{suffix.lstrip('.').lower()}" for suffix in settings.RMT_MEDIAEXT
+        }
         for item_to_check in directory.iterdir():
             if (
                 item_to_check.is_file()
                 and item_to_check != file_path
-                and file_stem in item_to_check.stem
-                and item_to_check.suffix.lower() != ".strm"
+                and (
+                    item_to_check.stem == file_stem
+                    or item_to_check.stem.startswith(
+                        tuple(file_stem + separator for separator in (".", "-", "_", " "))
+                    )
+                )
+                and item_to_check.suffix.lower() not in protected_suffixes
             ):
                 logger.warn(f"{func_type}删除文件 {item_to_check}")
                 item_to_check.unlink(missing_ok=True)
